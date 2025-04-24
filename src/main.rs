@@ -3,13 +3,13 @@ mod config;
 use clickhouse_rs::{row, types::Block, ClientHandle, Pool};
 use config as config_mod;
 use config_mod::AppConfig;
+use futures_util::{SinkExt, StreamExt};
 use log::{info, warn};
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::connect_async;
-use futures_util::{StreamExt, SinkExt};
+use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::main]
 async fn main() {
@@ -184,7 +184,7 @@ async fn insert_records(
         );
     }
     Ok(())
-} 
+}
 
 async fn batch_records(
     mut ws_read_channel: tokio::sync::mpsc::Receiver<String>,
@@ -210,7 +210,6 @@ async fn batch_records(
         }
     }
 }
-
 
 async fn read_websocket(url: &str, ws_write_channel: tokio::sync::mpsc::Sender<String>) {
     loop {
@@ -282,7 +281,6 @@ async fn read_websocket(url: &str, ws_write_channel: tokio::sync::mpsc::Sender<S
         }
     }
 }
-
 
 // Types and batch_records moved to lib.rs
 use certhoover::TransparencyRecord;
