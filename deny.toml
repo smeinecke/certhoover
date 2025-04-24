@@ -1,14 +1,20 @@
 [advisories]
-denied = ["unmaintained", "yanked", "unsound"]
+unmaintained = "all"
+yanked = "deny"
 
 [bans]
-denied = ["openssl-sys"] # Example: ban specific crates if needed
+deny = ["openssl-sys"] # Example: ban specific crates if needed
 
 [sources]
-denied = ["crates.io-index"] # Only allow trusted sources
+unknown-registry = "deny"
+unknown-git = "deny"
 
 [licenses]
-denied = ["GPL-3.0", "AGPL-3.0"]
-
-[features]
-denied = []
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "0BSD",
+    "Unlicense",
+    "Unicode-3.0"
+]

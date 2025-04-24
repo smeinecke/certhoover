@@ -2,10 +2,12 @@
 name = "certhoover"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 clickhouse-rs = "=1.1.0-alpha.1"
-config = { version = "0.14.0", features = ["toml"] }
+config = { version = "0.14.1", features = ["toml"] }
+
 env_logger = "0.11.3"
 futures-util = "0.3.30"
 log = "0.4.21"
@@ -13,4 +15,6 @@ serde = { version = "1.0.203", features = ["derive"] }
 serde_json = "1.0.117"
 tokio = { version = "1.32", features = ["rt-multi-thread", "full"] }
 toml = "0.8.20"
-tungstenite = { version = "0.21.0", features=["native-tls"] }
+tokio-tungstenite = { version = "0.23.1", features=["rustls-native-certs"] }
+
+

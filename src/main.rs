@@ -7,7 +7,9 @@ use log::{info, warn};
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::Duration;
-use tungstenite::{connect, Message};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::connect_async;
+use futures_util::{StreamExt, SinkExt};
 
 #[tokio::main]
 async fn main() {
@@ -32,8 +34,8 @@ async fn main() {
     }
     env_logger::init();
 
-    let (ws_sender, ws_receiver) = std::sync::mpsc::channel();
-    let (batch_sender, batch_receiver) = std::sync::mpsc::channel();
+    let (ws_sender, ws_receiver) = tokio::sync::mpsc::channel(100);
+    let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(100);
 
     let batch_size = config.service.batch_size;
     let max_batch_age = Duration::from_secs(config.service.max_batch_age_secs);
@@ -49,24 +51,22 @@ async fn main() {
         clickhouse_cfg.password
     );
 
-    // This could be a coroutine instead of a thread.
-    let websocket_reader = std::thread::spawn(move || {
-        read_websocket(&certstream_url, ws_sender);
+    let ws_sender_clone = ws_sender.clone();
+    let websocket_task = tokio::spawn(async move {
+        read_websocket(&certstream_url, ws_sender_clone).await;
     });
 
-    let batcher = std::thread::spawn(move || {
-        batch_records(ws_receiver, batch_sender, batch_size, max_batch_age);
+    let batcher_task = tokio::spawn(async move {
+        batch_records(ws_receiver, batch_sender, batch_size, max_batch_age).await;
     });
 
-    // Inserter is async, so we don't need a thread but do need to await it.
-    // Use liveness_path from config file for systemd liveness file
     let liveness_path = std::path::PathBuf::from(&config.service.liveness_path);
     insert_records(clickhouse_conn_str, batch_receiver, liveness_path)
         .await
         .unwrap();
 
-    websocket_reader.join().unwrap();
-    batcher.join().unwrap();
+    websocket_task.await.unwrap();
+    batcher_task.await.unwrap();
 }
 
 async fn maybe_create_table(client: &mut ClientHandle) {
@@ -117,7 +117,7 @@ fn touch_file(path: &PathBuf) {
 
 async fn insert_records(
     connection_string: String,
-    batch_receiver: std::sync::mpsc::Receiver<Vec<TransparencyRecord>>,
+    mut batch_receiver: tokio::sync::mpsc::Receiver<Vec<TransparencyRecord>>,
     liveness_path: PathBuf,
 ) -> Result<(), Box<dyn Error>> {
     // Process batch of records for insertion.
@@ -126,63 +126,49 @@ async fn insert_records(
     // very compressible...?
 
     let pool = Pool::new(connection_string);
-
     let mut client = pool.get_handle().await?;
-
     maybe_create_table(&mut client).await;
 
-    loop {
+    while let Some(batch) = batch_receiver.recv().await {
         // Update liveness file
         touch_file(&liveness_path);
-
-        let batch = match batch_receiver.recv() {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("Batch channel closed in insert_records: {e}");
-                break Ok(());
-            }
-        };
-
-        let mut block = Block::new();
-        let mut inserted: u64 = 0;
-
-        for record in batch.iter() {
+        let mut block = Block::with_capacity(batch.len());
+        let mut inserted = 0;
+        for record in &batch {
             match &record.data {
                 Some(data) => {
                     // TODO: Can we avoid cloning here, and take ownership of the data?
                     // Note: this is a bit of a mess, but none of the two Clickhouse libraries I found seem to support
                     //       nested fields. We might be able to do some stuff with serdes to have it flatten the data
                     //       for us, but I'm not sure how to do that yet...
-                    for domain in data.leaf_cert.all_domains.iter() {
-                        block.push(row!{
-                                "cert_index" => data.cert_index,
-                                "cert_link" => data.cert_link.clone(),
-                                "fingerprint" => data.leaf_cert.fingerprint.clone(),
-                                "not_after" => data.leaf_cert.not_after,
-                                "not_before" => data.leaf_cert.not_before,
-                                "serial_number" => data.leaf_cert.serial_number.clone(),
-                                "c" => data.leaf_cert.subject.c.clone().unwrap_or_default(),
-                                "cn" => data.leaf_cert.subject.cn.clone().unwrap_or_default(),
-                                "l" => data.leaf_cert.subject.l.clone().unwrap_or_default(),
-                                "o" => data.leaf_cert.subject.o.clone().unwrap_or_default(),
-                                "ou" => data.leaf_cert.subject.ou.clone().unwrap_or_default(),
-                                "st" => data.leaf_cert.subject.st.clone().unwrap_or_default(),
-                                "aggregated" => data.leaf_cert.subject.aggregated.clone().unwrap_or_default(),
-                                "email_address" => data.leaf_cert.subject.email_address.clone().unwrap_or_default(),
-                                "domain" => domain.clone(),
-                                "authority_info_access" => data.leaf_cert.extensions.authority_info_access.clone().unwrap_or_default(),
-                                "authority_key_identifier" => data.leaf_cert.extensions.authority_key_identifier.clone().unwrap_or_default(),
-                                "basic_constraints" => data.leaf_cert.extensions.basic_constraints.clone().unwrap_or_default(),
-                                "certificate_policies" => data.leaf_cert.extensions.certificate_policies.clone().unwrap_or_default(),
-                                "ctl_signed_certificate_timestamp" => data.leaf_cert.extensions.ctl_signed_certificate_timestamp.clone().unwrap_or_default(),
-                                "extended_key_usage" => data.leaf_cert.extensions.extended_key_usage.clone().unwrap_or_default(),
-                                "key_usage" => data.leaf_cert.extensions.key_usage.clone().unwrap_or_default(),
-                                "subject_alt_name" => data.leaf_cert.extensions.subject_alt_name.clone().unwrap_or_default(),
-                                "subject_key_identifier" => data.leaf_cert.extensions.subject_key_identifier.clone().unwrap_or_default(),
-                                "signature_algorithm" => data.leaf_cert.signature_algorithm.clone().unwrap_or_default(),
-                            })?;
-                        inserted += 1;
-                    }
+                    block.push(row!{
+                        "cert_index" => data.cert_index,
+                        "cert_link" => data.cert_link.clone(),
+                        "fingerprint" => data.leaf_cert.fingerprint.clone(),
+                        "not_after" => data.leaf_cert.not_after,
+                        "not_before" => data.leaf_cert.not_before,
+                        "serial_number" => data.leaf_cert.serial_number.clone(),
+                        "c" => data.leaf_cert.subject.c.clone().unwrap_or_default(),
+                        "cn" => data.leaf_cert.subject.cn.clone().unwrap_or_default(),
+                        "l" => data.leaf_cert.subject.l.clone().unwrap_or_default(),
+                        "o" => data.leaf_cert.subject.o.clone().unwrap_or_default(),
+                        "ou" => data.leaf_cert.subject.ou.clone().unwrap_or_default(),
+                        "st" => data.leaf_cert.subject.st.clone().unwrap_or_default(),
+                        "aggregated" => data.leaf_cert.subject.aggregated.clone().unwrap_or_default(),
+                        "email_address" => data.leaf_cert.subject.email_address.clone().unwrap_or_default(),
+                        "domain" => data.leaf_cert.subject.cn.clone().unwrap_or_default(),
+                        "authority_info_access" => data.leaf_cert.extensions.authority_info_access.clone().unwrap_or_default(),
+                        "authority_key_identifier" => data.leaf_cert.extensions.authority_key_identifier.clone().unwrap_or_default(),
+                        "basic_constraints" => data.leaf_cert.extensions.basic_constraints.clone().unwrap_or_default(),
+                        "certificate_policies" => data.leaf_cert.extensions.certificate_policies.clone().unwrap_or_default(),
+                        "ctl_signed_certificate_timestamp" => data.leaf_cert.extensions.ctl_signed_certificate_timestamp.clone().unwrap_or_default(),
+                        "extended_key_usage" => data.leaf_cert.extensions.extended_key_usage.clone().unwrap_or_default(),
+                        "key_usage" => data.leaf_cert.extensions.key_usage.clone().unwrap_or_default(),
+                        "subject_alt_name" => data.leaf_cert.extensions.subject_alt_name.clone().unwrap_or_default(),
+                        "subject_key_identifier" => data.leaf_cert.extensions.subject_key_identifier.clone().unwrap_or_default(),
+                        "signature_algorithm" => data.leaf_cert.signature_algorithm.clone().unwrap_or_default(),
+                    })?;
+                    inserted += 1;
                 }
                 None => {
                     warn!("Record missing data field: {:?}", record);
@@ -197,77 +183,68 @@ async fn insert_records(
             inserted
         );
     }
-}
+    Ok(())
+} 
 
-fn batch_records(
-    ws_read_channel: std::sync::mpsc::Receiver<String>,
-    batch_queue: std::sync::mpsc::Sender<Vec<TransparencyRecord>>,
+async fn batch_records(
+    mut ws_read_channel: tokio::sync::mpsc::Receiver<String>,
+    batch_queue: tokio::sync::mpsc::Sender<Vec<TransparencyRecord>>,
     batch_size: usize,
     max_batch_age: Duration,
 ) {
-    // Pull from the websocket queue, batch up records, and shove them into the batch queue
-    // for insertion into Clickhouse.
-
     let mut message_buffer: Vec<TransparencyRecord> = Vec::new();
-    let mut last_batch_time = std::time::Instant::now();
+    let mut last_batch_time = tokio::time::Instant::now();
 
-    loop {
-        let message = match ws_read_channel.recv() {
-            Ok(msg) => msg,
-            Err(e) => {
-                warn!("Websocket channel closed in batch_records: {e}");
-                break;
-            }
-        };
+    while let Some(message) = ws_read_channel.recv().await {
         let record: TransparencyRecord = serde_json::from_str(&message).unwrap();
-
         message_buffer.push(record);
 
         if message_buffer.len() >= batch_size || last_batch_time.elapsed() >= max_batch_age {
             info!("Batching up {} records", message_buffer.len());
-            if let Err(e) = batch_queue.send(message_buffer) {
-                warn!("Batch queue send failed in batch_records: {e}");
+            if batch_queue.send(message_buffer).await.is_err() {
+                warn!("Batch queue send failed in batch_records");
                 break;
             }
             message_buffer = Vec::new();
-            last_batch_time = std::time::Instant::now();
+            last_batch_time = tokio::time::Instant::now();
         }
     }
 }
 
-fn read_websocket(url: &str, ws_write_channel: std::sync::mpsc::Sender<String>) {
+
+async fn read_websocket(url: &str, ws_write_channel: tokio::sync::mpsc::Sender<String>) {
     loop {
-        let (mut socket, _) = match connect(url) {
-            Ok(result) => result,
+        let ws_stream = match connect_async(url).await {
+            Ok((stream, _)) => stream,
             Err(e) => {
                 warn!("Error connecting to websocket: {:?}", e);
-                std::thread::sleep(Duration::from_secs(5));
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
 
+        let (mut write, mut read) = ws_stream.split();
         let mut error_count: u16 = 0;
         let max_errors = 5;
-
         let ping_interval = Duration::from_secs(5);
-        let mut last_ping_sent = std::time::Instant::now();
+        let mut last_ping_sent = tokio::time::Instant::now();
 
         loop {
-            // This isn't entirely ideal, given socket.read() is blocking so we're not guaranteed to meet the ping
-            // interval, but the WS is busy enough that this doesn't matter in practice.
-
             if last_ping_sent.elapsed() >= ping_interval {
                 info!("Sending ping");
-                socket
-                    .send(Message::Ping(vec![]))
-                    .expect("Error sending ping");
-                last_ping_sent = std::time::Instant::now();
+                if let Err(e) = write.send(Message::Ping(vec![])).await {
+                    warn!("Error sending ping: {:?}", e);
+                }
+                last_ping_sent = tokio::time::Instant::now();
             }
 
-            match socket.read() {
-                Ok(msg) => match msg {
+            match read.next().await {
+                Some(Ok(msg)) => match msg {
                     Message::Text(text) => {
-                        ws_write_channel.send(text).unwrap(); //todo: handle error
+                        if ws_write_channel.send(text).await.is_err() {
+                            warn!("Websocket channel closed");
+                            break;
+                        }
                     }
                     Message::Close(_) => {
                         info!("Connection closed");
@@ -275,9 +252,9 @@ fn read_websocket(url: &str, ws_write_channel: std::sync::mpsc::Sender<String>) 
                     }
                     Message::Ping(_) => {
                         info!("Received ping");
-                        socket
-                            .send(Message::Pong(vec![]))
-                            .expect("Error sending pong");
+                        if let Err(e) = write.send(Message::Pong(vec![])).await {
+                            warn!("Error sending pong: {:?}", e);
+                        }
                     }
                     Message::Pong(_) => {
                         info!("Received pong");
@@ -286,7 +263,7 @@ fn read_websocket(url: &str, ws_write_channel: std::sync::mpsc::Sender<String>) 
                         info!("Ignoring message: {:?}", msg);
                     }
                 },
-                Err(e) => {
+                Some(Err(e)) => {
                     error_count += 1;
                     warn!(
                         "[{}/{}] Error reading message: {:?}",
@@ -297,11 +274,15 @@ fn read_websocket(url: &str, ws_write_channel: std::sync::mpsc::Sender<String>) 
                         break;
                     }
                 }
+                None => {
+                    warn!("Websocket stream ended");
+                    break;
+                }
             }
-            socket.flush().unwrap();
         }
     }
 }
+
 
 // Types and batch_records moved to lib.rs
 use certhoover::TransparencyRecord;
