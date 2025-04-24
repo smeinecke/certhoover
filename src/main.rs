@@ -5,9 +5,9 @@ use config as config_mod;
 use config_mod::AppConfig;
 use futures_util::{SinkExt, StreamExt};
 use log::{info, warn};
+use publicsuffix::{List, Psl};
 use std::error::Error;
 use std::path::PathBuf;
-use publicsuffix::{Psl, List};
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -218,8 +218,14 @@ async fn insert_records(
                         .strip_prefix("*.")
                         .map_or(domain.clone(), |s| s.to_string());
 
-                    let tld = list.suffix(domain.as_bytes()).unwrap().as_bytes();
-                    let root_domain = list.domain(domain.as_bytes()).unwrap().as_bytes();
+                    let tld = match list.suffix(domain.as_bytes()) {
+                        Some(s) => std::str::from_utf8(s.as_bytes()).unwrap_or("").to_string(),
+                        None => "".to_string(),
+                    };
+                    let root_domain = match list.domain(domain.as_bytes()) {
+                        Some(d) => std::str::from_utf8(d.as_bytes()).unwrap_or("").to_string(),
+                        None => "".to_string(),
+                    };
 
                     if let Err(e) = block.push(row!{
                         "cert_index" => data.cert_index,
