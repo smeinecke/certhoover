@@ -42,14 +42,14 @@ async fn main() {
 
     let certstream_url = config.certstream.url.clone();
     let clickhouse_cfg = config.clickhouse;
-    let clickhouse_conn_str = format!(
-        "tcp://{}:{}?database={}&user={}&password={}",
-        clickhouse_cfg.host,
-        clickhouse_cfg.port,
-        clickhouse_cfg.database,
-        clickhouse_cfg.user,
-        clickhouse_cfg.password
-    );
+    let clickhouse_conn_str = match (clickhouse_cfg.user.as_str(), clickhouse_cfg.password.as_str()) {
+        (user, password) if !user.is_empty() && !password.is_empty() =>
+            format!("tcp://{user}:{password}@{}:{}/{}", clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database),
+        (user, _) if !user.is_empty() =>
+            format!("tcp://{user}@{}:{}/{}", clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database),
+        _ =>
+            format!("tcp://{}:{}/{}", clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database),
+    };
 
     let ws_sender_clone = ws_sender.clone();
     let websocket_task = tokio::spawn(async move {
