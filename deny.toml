@@ -1,0 +1,14 @@
+[advisories]
+denied = ["unmaintained", "yanked", "unsound"]
+
+[bans]
+denied = ["openssl-sys"] # Example: ban specific crates if needed
+
+[sources]
+denied = ["crates.io-index"] # Only allow trusted sources
+
+[licenses]
+denied = ["GPL-3.0", "AGPL-3.0"]
+
+[features]
+denied = []

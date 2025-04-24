@@ -1,0 +1,27 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - 'v*.*.*' # Only run for version tags like v1.2.3
+  workflow_dispatch:
+
+jobs:
+  build-binaries:
+    name: Build binaries for release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/${{ matrix.target }}/release/certhoover
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

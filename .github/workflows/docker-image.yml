@@ -2,9 +2,14 @@ name: Docker Image CI
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    tags:
+      - 'v*.*.*' # Only run for version tags like v1.2.3
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag for Docker image'
+        required: false
+        default: ''
 
 jobs:
 
@@ -14,5 +19,15 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Set version/tag
+      id: vars
+      run: |
+        if [ -n "${{ github.event.inputs.version }}" ]; then
+          echo "TAG=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+        elif [[ $GITHUB_REF == refs/tags/* ]]; then
+          echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+        else
+          echo "TAG=latest" >> $GITHUB_ENV
+        fi
     - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag josephredfern/certhoover:latest --tag josephredfern/certhoover:$(date +%s)
+      run: docker build . --file Dockerfile --tag josephredfern/certhoover:${{ env.TAG }}
