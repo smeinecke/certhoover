@@ -69,7 +69,7 @@ async fn main() {
     batcher_task.await.unwrap();
 }
 
-async fn maybe_create_table(client: &mut ClientHandle) {
+async fn maybe_create_table(client: &mut ClientHandle) -> Result<(), Box<dyn Error>> {
     let create_table_query = r#"
 CREATE TABLE IF NOT EXISTS certs
 (
@@ -103,7 +103,13 @@ CREATE TABLE IF NOT EXISTS certs
 ENGINE = MergeTree
 ORDER BY (cert_index, domain, timestamp)"#;
 
-    client.execute(create_table_query).await.unwrap();
+    match client.execute(create_table_query).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("Failed to create table: {}", e);
+            Err(Box::new(e))
+        }
+    }
 }
 
 fn touch_file(path: &PathBuf) {
@@ -126,8 +132,18 @@ async fn insert_records(
     // very compressible...?
 
     let pool = Pool::new(connection_string);
-    let mut client = pool.get_handle().await?;
-    maybe_create_table(&mut client).await;
+    let mut client = match pool.get_handle().await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to connect to ClickHouse: {e}");
+            return Err(Box::new(e));
+        }
+    };
+
+    if let Err(e) = maybe_create_table(&mut client).await {
+        eprintln!("Table creation failed: {e}");
+        return Err(e);
+    }
 
     while let Some(batch) = batch_receiver.recv().await {
         // Update liveness file
@@ -137,10 +153,6 @@ async fn insert_records(
         for record in &batch {
             match &record.data {
                 Some(data) => {
-                    // TODO: Can we avoid cloning here, and take ownership of the data?
-                    // Note: this is a bit of a mess, but none of the two Clickhouse libraries I found seem to support
-                    //       nested fields. We might be able to do some stuff with serdes to have it flatten the data
-                    //       for us, but I'm not sure how to do that yet...
                     block.push(row!{
                         "cert_index" => data.cert_index,
                         "cert_link" => data.cert_link.clone(),
@@ -167,7 +179,7 @@ async fn insert_records(
                         "subject_alt_name" => data.leaf_cert.extensions.subject_alt_name.clone().unwrap_or_default(),
                         "subject_key_identifier" => data.leaf_cert.extensions.subject_key_identifier.clone().unwrap_or_default(),
                         "signature_algorithm" => data.leaf_cert.signature_algorithm.clone().unwrap_or_default(),
-                    })?;
+                    });
                     inserted += 1;
                 }
                 None => {
@@ -175,8 +187,10 @@ async fn insert_records(
                 }
             }
         }
-        client.insert("certs", block).await.unwrap();
-
+        if let Err(e) = client.insert("certs", block).await {
+            eprintln!("Failed to insert batch into ClickHouse: {e}");
+            return Err(Box::new(e));
+        }
         info!(
             "Written batch of {} records, expanded to {} rows",
             batch.len(),
