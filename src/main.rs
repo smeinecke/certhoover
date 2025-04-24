@@ -11,6 +11,16 @@ use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
+fn parse_subject_aggregated(aggregated: &str) -> std::collections::HashMap<&str, String> {
+    let mut map = std::collections::HashMap::new();
+    for part in aggregated.split('/') {
+        if let Some((key, value)) = part.split_once('=') {
+            map.insert(key, value.to_string());
+        }
+    }
+    map
+}
+
 #[tokio::main]
 async fn main() {
     // This whole thing is a bit of a monstrosity, for several reasons:
@@ -163,6 +173,29 @@ async fn insert_records(
         for record in &batch {
             match &record.data {
                 Some(data) => {
+                    let agg_map = data
+                        .leaf_cert
+                        .subject
+                        .aggregated
+                        .as_ref()
+                        .map(|agg| parse_subject_aggregated(agg));
+
+                    let get_field = |key: &str, orig: &Option<String>| {
+                        orig.clone()
+                            .or_else(|| agg_map.as_ref().and_then(|m| m.get(key).cloned()))
+                    };
+
+                    let domain = data
+                        .leaf_cert
+                        .all_domains
+                        .first()
+                        .cloned()
+                        .or_else(|| get_field("CN", &data.leaf_cert.subject.cn))
+                        .unwrap_or_default();
+                    let domain = domain
+                        .strip_prefix("*.")
+                        .map_or(domain.clone(), |s| s.to_string());
+
                     if let Err(e) = block.push(row!{
                         "cert_index" => data.cert_index,
                         "cert_link" => data.cert_link.clone(),
@@ -170,17 +203,15 @@ async fn insert_records(
                         "not_after" => data.leaf_cert.not_after,
                         "not_before" => data.leaf_cert.not_before,
                         "serial_number" => data.leaf_cert.serial_number.clone(),
-                        "c" => data.leaf_cert.subject.c.clone().unwrap_or_default(),
-                        "cn" => data.leaf_cert.subject.cn.clone().unwrap_or_default(),
-                        "l" => data.leaf_cert.subject.l.clone().unwrap_or_default(),
-                        "o" => data.leaf_cert.subject.o.clone().unwrap_or_default(),
-                        "ou" => data.leaf_cert.subject.ou.clone().unwrap_or_default(),
-                        "st" => data.leaf_cert.subject.st.clone().unwrap_or_default(),
+                        "c" => get_field("C", &data.leaf_cert.subject.c).unwrap_or_default(),
+                        "cn" => get_field("CN", &data.leaf_cert.subject.cn).unwrap_or_default(),
+                        "l" => get_field("L", &data.leaf_cert.subject.l).unwrap_or_default(),
+                        "o" => get_field("O", &data.leaf_cert.subject.o).unwrap_or_default(),
+                        "ou" => get_field("OU", &data.leaf_cert.subject.ou).unwrap_or_default(),
+                        "st" => get_field("ST", &data.leaf_cert.subject.st).unwrap_or_default(),
                         "aggregated" => data.leaf_cert.subject.aggregated.clone().unwrap_or_default(),
                         "email_address" => data.leaf_cert.subject.email_address.clone().unwrap_or_default(),
-                        "domain" => data.leaf_cert.all_domains.get(0).cloned()
-    .or_else(|| data.leaf_cert.subject.cn.clone())
-    .unwrap_or_default(),
+                        "domain" => domain,
                         "authority_info_access" => data.leaf_cert.extensions.authority_info_access.clone().unwrap_or_default(),
                         "authority_key_identifier" => data.leaf_cert.extensions.authority_key_identifier.clone().unwrap_or_default(),
                         "basic_constraints" => data.leaf_cert.extensions.basic_constraints.clone().unwrap_or_default(),

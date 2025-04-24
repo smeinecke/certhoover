@@ -27,7 +27,7 @@ fn test_domain_extraction_from_all_domains_and_cn() {
     let domain = data
         .leaf_cert
         .all_domains
-        .get(0)
+        .first()
         .cloned()
         .or_else(|| data.leaf_cert.subject.cn.clone())
         .unwrap_or_default();
@@ -60,7 +60,7 @@ fn test_domain_extraction_from_all_domains_and_cn() {
     let domain = data
         .leaf_cert
         .all_domains
-        .get(0)
+        .first()
         .cloned()
         .or_else(|| data.leaf_cert.subject.cn.clone())
         .unwrap_or_default();
