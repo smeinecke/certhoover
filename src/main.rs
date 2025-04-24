@@ -42,13 +42,22 @@ async fn main() {
 
     let certstream_url = config.certstream.url.clone();
     let clickhouse_cfg = config.clickhouse;
-    let clickhouse_conn_str = match (clickhouse_cfg.user.as_str(), clickhouse_cfg.password.as_str()) {
-        (user, password) if !user.is_empty() && !password.is_empty() =>
-            format!("tcp://{user}:{password}@{}:{}/{}", clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database),
-        (user, _) if !user.is_empty() =>
-            format!("tcp://{user}@{}:{}/{}", clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database),
-        _ =>
-            format!("tcp://{}:{}/{}", clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database),
+    let clickhouse_conn_str = match (
+        clickhouse_cfg.user.as_str(),
+        clickhouse_cfg.password.as_str(),
+    ) {
+        (user, password) if !user.is_empty() && !password.is_empty() => format!(
+            "tcp://{user}:{password}@{}:{}/{}",
+            clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database
+        ),
+        (user, _) if !user.is_empty() => format!(
+            "tcp://{user}@{}:{}/{}",
+            clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database
+        ),
+        _ => format!(
+            "tcp://{}:{}/{}",
+            clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database
+        ),
     };
 
     let ws_sender_clone = ws_sender.clone();
@@ -135,7 +144,9 @@ async fn insert_records(
     let mut client = match pool.get_handle().await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to connect to ClickHouse: {e}\nConnection string: {connection_string}");
+            eprintln!(
+                "Failed to connect to ClickHouse: {e}\nConnection string: {connection_string}"
+            );
             return Err(Box::new(e));
         }
     };
@@ -167,7 +178,9 @@ async fn insert_records(
                         "st" => data.leaf_cert.subject.st.clone().unwrap_or_default(),
                         "aggregated" => data.leaf_cert.subject.aggregated.clone().unwrap_or_default(),
                         "email_address" => data.leaf_cert.subject.email_address.clone().unwrap_or_default(),
-                        "domain" => data.leaf_cert.subject.cn.clone().unwrap_or_default(),
+                        "domain" => data.leaf_cert.all_domains.get(0).cloned()
+    .or_else(|| data.leaf_cert.subject.cn.clone())
+    .unwrap_or_default(),
                         "authority_info_access" => data.leaf_cert.extensions.authority_info_access.clone().unwrap_or_default(),
                         "authority_key_identifier" => data.leaf_cert.extensions.authority_key_identifier.clone().unwrap_or_default(),
                         "basic_constraints" => data.leaf_cert.extensions.basic_constraints.clone().unwrap_or_default(),
