@@ -131,15 +131,14 @@ async fn insert_records(
     // This is pretty inefficient, but it's a simple way to get the data into Clickhouse, and the data is probably
     // very compressible...?
 
-    let pool = Pool::new(connection_string);
+    let pool = Pool::new(connection_string.clone());
     let mut client = match pool.get_handle().await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to connect to ClickHouse: {e}");
+            eprintln!("Failed to connect to ClickHouse: {e}\nConnection string: {connection_string}");
             return Err(Box::new(e));
         }
     };
-
     if let Err(e) = maybe_create_table(&mut client).await {
         eprintln!("Table creation failed: {e}");
         return Err(e);
@@ -153,7 +152,7 @@ async fn insert_records(
         for record in &batch {
             match &record.data {
                 Some(data) => {
-                    block.push(row!{
+                    if let Err(e) = block.push(row!{
                         "cert_index" => data.cert_index,
                         "cert_link" => data.cert_link.clone(),
                         "fingerprint" => data.leaf_cert.fingerprint.clone(),
@@ -179,7 +178,10 @@ async fn insert_records(
                         "subject_alt_name" => data.leaf_cert.extensions.subject_alt_name.clone().unwrap_or_default(),
                         "subject_key_identifier" => data.leaf_cert.extensions.subject_key_identifier.clone().unwrap_or_default(),
                         "signature_algorithm" => data.leaf_cert.signature_algorithm.clone().unwrap_or_default(),
-                    });
+                    }) {
+                        warn!("Failed to add row to block: {e:?} (record: {:?})", record);
+                        continue;
+                    }
                     inserted += 1;
                 }
                 None => {
