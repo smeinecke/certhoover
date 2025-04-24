@@ -7,6 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use log::{info, warn};
 use std::error::Error;
 use std::path::PathBuf;
+use publicsuffix::{Psl, List};
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -96,6 +97,9 @@ CREATE TABLE IF NOT EXISTS certs
     `cert_index` UInt64,
     `cert_link` String,
     `domain` String,
+    `hostnames` String,
+    `tld` String,
+    `root_domain` String,
     `fingerprint` String,
     `not_after` UInt64,
     `not_before` UInt64,
@@ -150,6 +154,7 @@ async fn insert_records(
     // This is pretty inefficient, but it's a simple way to get the data into Clickhouse, and the data is probably
     // very compressible...?
 
+    let list = List::default();
     let pool = Pool::new(connection_string.clone());
     let mut client = match pool.get_handle().await {
         Ok(c) => c,
@@ -192,9 +197,29 @@ async fn insert_records(
                         .cloned()
                         .or_else(|| get_field("CN", &data.leaf_cert.subject.cn))
                         .unwrap_or_default();
+
+                    let mut hostnames_set = std::collections::HashSet::new();
+                    // Extract from subject_alt_name
+                    if let Some(san) = data.leaf_cert.extensions.subject_alt_name.as_ref() {
+                        for entry in san.split(',') {
+                            let entry = entry.trim();
+                            if let Some(host) = entry.strip_prefix("DNS:") {
+                                hostnames_set.insert(host.to_string());
+                            }
+                        }
+                    }
+
+                    hostnames_set.insert(domain.clone());
+                    let mut hostnames: Vec<String> = hostnames_set.into_iter().collect();
+                    hostnames.sort();
+                    let hostnames_json = serde_json::to_string(&hostnames).unwrap();
+
                     let domain = domain
                         .strip_prefix("*.")
                         .map_or(domain.clone(), |s| s.to_string());
+
+                    let tld = list.suffix(domain.as_bytes()).unwrap().as_bytes();
+                    let root_domain = list.domain(domain.as_bytes()).unwrap().as_bytes();
 
                     if let Err(e) = block.push(row!{
                         "cert_index" => data.cert_index,
@@ -212,6 +237,9 @@ async fn insert_records(
                         "aggregated" => data.leaf_cert.subject.aggregated.clone().unwrap_or_default(),
                         "email_address" => data.leaf_cert.subject.email_address.clone().unwrap_or_default(),
                         "domain" => domain,
+                        "hostnames" => hostnames_json,
+                        "tld" => tld,
+                        "root_domain" => root_domain,
                         "authority_info_access" => data.leaf_cert.extensions.authority_info_access.clone().unwrap_or_default(),
                         "authority_key_identifier" => data.leaf_cert.extensions.authority_key_identifier.clone().unwrap_or_default(),
                         "basic_constraints" => data.leaf_cert.extensions.basic_constraints.clone().unwrap_or_default(),
