@@ -1,19 +1,13 @@
-mod settings;
+mod config;
 
-use settings::Settings;
-
-use clickhouse_rs::types::Block;
-use clickhouse_rs::{row, ClientHandle, Pool};
+use clickhouse_rs::{row, types::Block, ClientHandle, Pool};
+use config as config_mod;
+use config_mod::AppConfig;
 use log::{info, warn};
-use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::Duration;
 use tungstenite::{connect, Message};
-
-const CERTSTREAM_URL: &str = "wss://certstream.calidog.io/";
-const BATCH_SIZE: usize = 1000;
-const MAX_BATCH_AGE: Duration = Duration::new(5, 0);
 
 #[tokio::main]
 async fn main() {
@@ -24,30 +18,52 @@ async fn main() {
     //   it's performant enough -- there can be quite a few messages coming in from the websocket.
     // * I don't really know how to write idiomatic rust (yet).
 
-    env_logger::init();
+    // Allow config path override via CERTHOOVER_CONFIG env var
+    let config_path =
+        std::env::var("CERTHOOVER_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
+    let config = AppConfig::from_file(&config_path).unwrap_or_else(|e| {
+        eprintln!("Failed to load config from '{}': {e}", config_path);
+        std::process::exit(1);
+    });
 
-    let settings = Settings::new().unwrap();
+    // Set RUST_LOG from config if not already set
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", &config.service.logging_level);
+    }
+    env_logger::init();
 
     let (ws_sender, ws_receiver) = std::sync::mpsc::channel();
     let (batch_sender, batch_receiver) = std::sync::mpsc::channel();
 
+    let batch_size = config.service.batch_size;
+    let max_batch_age = Duration::from_secs(config.service.max_batch_age_secs);
+
+    let certstream_url = config.certstream.url.clone();
+    let clickhouse_cfg = config.clickhouse;
+    let clickhouse_conn_str = format!(
+        "tcp://{}:{}?database={}&user={}&password={}",
+        clickhouse_cfg.host,
+        clickhouse_cfg.port,
+        clickhouse_cfg.database,
+        clickhouse_cfg.user,
+        clickhouse_cfg.password
+    );
+
     // This could be a coroutine instead of a thread.
     let websocket_reader = std::thread::spawn(move || {
-        read_websocket(CERTSTREAM_URL, ws_sender);
+        read_websocket(&certstream_url, ws_sender);
     });
 
     let batcher = std::thread::spawn(move || {
-        batch_records(ws_receiver, batch_sender);
+        batch_records(ws_receiver, batch_sender, batch_size, max_batch_age);
     });
 
     // Inserter is async, so we don't need a thread but do need to await it.
-    insert_records(
-        settings.connection_string,
-        batch_receiver,
-        settings.liveness_path,
-    )
-    .await
-    .unwrap();
+    // Use liveness_path from config file for systemd liveness file
+    let liveness_path = std::path::PathBuf::from(&config.service.liveness_path);
+    insert_records(clickhouse_conn_str, batch_receiver, liveness_path)
+        .await
+        .unwrap();
 
     websocket_reader.join().unwrap();
     batcher.join().unwrap();
@@ -94,7 +110,8 @@ fn touch_file(path: &PathBuf) {
     std::fs::OpenOptions::new()
         .write(true)
         .create(true)
-        .open(&path)
+        .truncate(true)
+        .open(path)
         .unwrap();
 }
 
@@ -118,7 +135,13 @@ async fn insert_records(
         // Update liveness file
         touch_file(&liveness_path);
 
-        let batch = batch_receiver.recv().unwrap(); //TODO: handle error
+        let batch = match batch_receiver.recv() {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Batch channel closed in insert_records: {e}");
+                break Ok(());
+            }
+        };
 
         let mut block = Block::new();
         let mut inserted: u64 = 0;
@@ -179,23 +202,33 @@ async fn insert_records(
 fn batch_records(
     ws_read_channel: std::sync::mpsc::Receiver<String>,
     batch_queue: std::sync::mpsc::Sender<Vec<TransparencyRecord>>,
+    batch_size: usize,
+    max_batch_age: Duration,
 ) {
     // Pull from the websocket queue, batch up records, and shove them into the batch queue
     // for insertion into Clickhouse.
 
-    // Would a fixed size buffer be better here? We won't always fill it but could avoid the reallocation?
     let mut message_buffer: Vec<TransparencyRecord> = Vec::new();
     let mut last_batch_time = std::time::Instant::now();
 
     loop {
-        let message = ws_read_channel.recv().unwrap(); //TODO: handle error
+        let message = match ws_read_channel.recv() {
+            Ok(msg) => msg,
+            Err(e) => {
+                warn!("Websocket channel closed in batch_records: {e}");
+                break;
+            }
+        };
         let record: TransparencyRecord = serde_json::from_str(&message).unwrap();
 
         message_buffer.push(record);
 
-        if message_buffer.len() >= BATCH_SIZE || last_batch_time.elapsed() >= MAX_BATCH_AGE {
+        if message_buffer.len() >= batch_size || last_batch_time.elapsed() >= max_batch_age {
             info!("Batching up {} records", message_buffer.len());
-            batch_queue.send(message_buffer).unwrap(); //TODO: handle error
+            if let Err(e) = batch_queue.send(message_buffer) {
+                warn!("Batch queue send failed in batch_records: {e}");
+                break;
+            }
             message_buffer = Vec::new();
             last_batch_time = std::time::Instant::now();
         }
@@ -270,72 +303,5 @@ fn read_websocket(url: &str, ws_write_channel: std::sync::mpsc::Sender<String>) 
     }
 }
 
-// TODO: expand these structs to include more data.
-#[derive(Deserialize, Debug, Clone, Serialize)]
-struct TransparencyRecordData {
-    cert_index: u64,
-    cert_link: String,
-    leaf_cert: LeafCert,
-}
-
-#[derive(Deserialize, Debug, Clone, Serialize)]
-struct TransparencyRecord {
-    data: Option<TransparencyRecordData>,
-    message_type: String,
-}
-
-#[derive(Deserialize, Debug, Clone, Serialize)]
-struct LeafCert {
-    all_domains: Vec<String>,
-
-    fingerprint: String,
-    not_after: u64,
-    not_before: u64,
-    serial_number: String,
-    subject: Subject,
-    extensions: Extensions,
-    signature_algorithm: Option<String>,
-}
-#[derive(Deserialize, Debug, Clone, Serialize)]
-struct Subject {
-    c: Option<String>,
-    cn: Option<String>,
-    l: Option<String>,
-    o: Option<String>,
-    ou: Option<String>,
-    st: Option<String>,
-    aggregated: Option<String>,
-
-    #[serde(alias = "emailAddress")]
-    email_address: Option<String>,
-}
-
-#[derive(Deserialize, Debug, Clone, Serialize)]
-struct Extensions {
-    #[serde(alias = "authorityInfoAccess")]
-    authority_info_access: Option<String>,
-
-    #[serde(alias = "authorityKeyIdentifier")]
-    authority_key_identifier: Option<String>,
-
-    #[serde(alias = "basicConstraints")]
-    basic_constraints: Option<String>,
-
-    #[serde(alias = "certificatePolicies")]
-    certificate_policies: Option<String>,
-
-    #[serde(alias = "ctlSignedCertificateTimestamp")]
-    ctl_signed_certificate_timestamp: Option<String>,
-
-    #[serde(alias = "extendedKeyUsage")]
-    extended_key_usage: Option<String>,
-
-    #[serde(alias = "keyUsage")]
-    key_usage: Option<String>,
-
-    #[serde(alias = "subjectAltName")]
-    subject_alt_name: Option<String>,
-
-    #[serde(alias = "subjectKeyIdentifier")]
-    subject_key_identifier: Option<String>,
-}
+// Types and batch_records moved to lib.rs
+use certhoover::TransparencyRecord;
