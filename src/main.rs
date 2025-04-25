@@ -59,10 +59,16 @@ async fn main() -> Result<()> {
         batch_records(ws_receiver, batch_sender, batch_size, max_batch_age).await;
     });
 
-    let enable_systemd_notify = config.service.enable_systemd_notify;
-    insert_records(clickhouse_conn_str, batch_receiver, enable_systemd_notify)
-        .await
-        .with_context(|| "Failed to insert records into ClickHouse")?;
+    let enable_systemd_notify = config.service.enable_systemd_notify.unwrap_or(false);
+    let debug_log_first_batch_record = config.service.debug_log_first_batch_record;
+    insert_records(
+        clickhouse_conn_str,
+        batch_receiver,
+        enable_systemd_notify,
+        debug_log_first_batch_record,
+    )
+    .await
+    .with_context(|| "Failed to insert records into ClickHouse")?;
 
     websocket_task.await.context("Websocket task failed")?;
     batcher_task.await.context("Batcher task failed")?;
@@ -114,6 +120,7 @@ async fn insert_records(
     connection_string: String,
     mut batch_receiver: tokio::sync::mpsc::Receiver<Vec<TransparencyRecord>>,
     enable_systemd_notify: bool,
+    debug_log_first_batch_record: bool,
 ) -> Result<()> {
     // Process batch of records for insertion.
     let list = List::default();
@@ -122,6 +129,13 @@ async fn insert_records(
     maybe_create_table(&mut client).await?;
 
     while let Some(batch) = batch_receiver.recv().await {
+        if debug_log_first_batch_record {
+            if let Some(first) = batch.first() {
+                info!("First record in batch: {:?}", first);
+            } else {
+                info!("Batch is empty, no first record to log.");
+            }
+        }
         // Update liveness file
 
         let mut block = Block::with_capacity(batch.len());

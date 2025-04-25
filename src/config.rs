@@ -16,10 +16,13 @@ pub struct ClickhouseConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct ServiceConfig {
-    pub enable_systemd_notify: bool,
+    #[serde(default)]
+    pub enable_systemd_notify: Option<bool>,
     pub batch_size: usize,
     pub max_batch_age_secs: u64,
     pub logging_level: String,
+    #[serde(default)]
+    pub debug_log_first_batch_record: bool,
 }
 
 #[derive(Debug, Deserialize)]

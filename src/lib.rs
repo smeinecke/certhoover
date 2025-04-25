@@ -149,9 +149,15 @@ pub fn reformat_cert_fields(
             }
         }
     }
-    // Add CN/domain if non-empty
-    if !domain.is_empty() {
-        hostnames_set.insert(domain.clone());
+    // Add all domains (including IPs) from all_domains
+    for d in all_domains {
+        hostnames_set.insert(d.clone());
+    }
+    // Add CN if present and not already in set
+    if let Some(cn_val) = cn.clone() {
+        if !cn_val.is_empty() {
+            hostnames_set.insert(cn_val);
+        }
     }
     let mut hostnames: Vec<String> = hostnames_set.into_iter().collect();
     hostnames.sort();
