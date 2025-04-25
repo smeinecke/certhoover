@@ -2,9 +2,6 @@
 unmaintained = "all"
 yanked = "deny"
 
-[bans]
-deny = ["openssl-sys"] # Example: ban specific crates if needed
-
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
