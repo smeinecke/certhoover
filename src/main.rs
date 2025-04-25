@@ -24,13 +24,6 @@ fn parse_subject_aggregated(aggregated: &str) -> std::collections::HashMap<&str,
 
 #[tokio::main]
 async fn main() {
-    // This whole thing is a bit of a monstrosity, for several reasons:
-    //
-    // * There's a hodge-podge of thread-based and async code here... the two main Clickhouse libraries I found are
-    //   both async, the websocket library /can/ be async, but I don't know enough about async in rust to know whether
-    //   it's performant enough -- there can be quite a few messages coming in from the websocket.
-    // * I don't really know how to write idiomatic rust (yet).
-
     // Allow config path override via CERTHOOVER_CONFIG env var
     let config_path =
         std::env::var("CERTHOOVER_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
@@ -150,9 +143,6 @@ async fn insert_records(
     liveness_path: PathBuf,
 ) -> Result<(), Box<dyn Error>> {
     // Process batch of records for insertion.
-    // Rather than deal with nested fields in the JSON, we flatten the data into a single row per domain.
-    // This is pretty inefficient, but it's a simple way to get the data into Clickhouse, and the data is probably
-    // very compressible...?
 
     let list = List::default();
     let pool = Pool::new(connection_string.clone());
@@ -320,56 +310,62 @@ async fn read_websocket(url: &str, ws_write_channel: tokio::sync::mpsc::Sender<S
         let mut error_count: u16 = 0;
         let max_errors = 5;
         let ping_interval = Duration::from_secs(5);
-        let mut last_ping_sent = tokio::time::Instant::now();
+        let mut _last_ping_sent = tokio::time::Instant::now();
 
         loop {
-            if last_ping_sent.elapsed() >= ping_interval {
-                info!("Sending ping");
-                if let Err(e) = write.send(Message::Ping(vec![])).await {
-                    warn!("Error sending ping: {:?}", e);
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    // Allow other tasks to run, avoid busy loop
                 }
-                last_ping_sent = tokio::time::Instant::now();
-            }
-
-            match read.next().await {
-                Some(Ok(msg)) => match msg {
-                    Message::Text(text) => {
-                        if ws_write_channel.send(text).await.is_err() {
-                            warn!("Websocket channel closed");
+                _ = tokio::time::sleep(ping_interval) => {
+                    info!("Sending ping");
+                    if let Err(e) = write.send(Message::Ping(vec![])).await {
+                        warn!("Error sending ping: {:?}", e);
+                    }
+                    _last_ping_sent = tokio::time::Instant::now();
+                }
+                msg = read.next() => {
+                    match msg {
+                        Some(Ok(msg)) => match msg {
+                            Message::Text(text) => {
+                                if ws_write_channel.send(text).await.is_err() {
+                                    warn!("Websocket channel closed");
+                                    break;
+                                }
+                            }
+                            Message::Close(_) => {
+                                info!("Connection closed");
+                                break;
+                            }
+                            Message::Ping(_) => {
+                                info!("Received ping");
+                                if let Err(e) = write.send(Message::Pong(vec![])).await {
+                                    warn!("Error sending pong: {:?}", e);
+                                }
+                            }
+                            Message::Pong(_) => {
+                                info!("Received pong");
+                            }
+                            _ => {
+                                info!("Ignoring message: {:?}", msg);
+                            }
+                        },
+                        Some(Err(e)) => {
+                            error_count += 1;
+                            warn!(
+                                "[{}/{}] Error reading message: {:?}",
+                                error_count, max_errors, e
+                            );
+                            if error_count >= max_errors {
+                                warn!("Too many errors, closing connection");
+                                break;
+                            }
+                        }
+                        None => {
+                            warn!("Websocket stream ended");
                             break;
                         }
                     }
-                    Message::Close(_) => {
-                        info!("Connection closed");
-                        break;
-                    }
-                    Message::Ping(_) => {
-                        info!("Received ping");
-                        if let Err(e) = write.send(Message::Pong(vec![])).await {
-                            warn!("Error sending pong: {:?}", e);
-                        }
-                    }
-                    Message::Pong(_) => {
-                        info!("Received pong");
-                    }
-                    _ => {
-                        info!("Ignoring message: {:?}", msg);
-                    }
-                },
-                Some(Err(e)) => {
-                    error_count += 1;
-                    warn!(
-                        "[{}/{}] Error reading message: {:?}",
-                        error_count, max_errors, e
-                    );
-                    if error_count >= max_errors {
-                        warn!("Too many errors, closing connection");
-                        break;
-                    }
-                }
-                None => {
-                    warn!("Websocket stream ended");
-                    break;
                 }
             }
         }
