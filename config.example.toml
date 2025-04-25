@@ -1,0 +1,15 @@
+[certstream]
+url = "wss://certstream.calidog.io/"
+
+[clickhouse]
+host = "localhost"
+port = 9000
+user = "default"
+password = ""
+database = "default"
+
+[service]
+liveness_path = "/run/certhoover/liveness"
+batch_size = 1000
+max_batch_age_secs = 5
+logging_level = "info"

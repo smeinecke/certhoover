@@ -1,0 +1,79 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - 'v*.*.*' # Only run for version tags like v1.2.3
+  workflow_dispatch:
+
+jobs:
+  build-binaries:
+    name: Build binaries for release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            suffix: amd64
+            arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            suffix: arm64
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          target: ${{ matrix.target }}
+      - name: Install ${{ matrix.suffix }} cross-compiler and OpenSSL for cross
+        if: matrix.suffix != 'amd64'
+        run: |
+          # check for deb822 source format
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu-arm.sources
+            sudo sed -i 's,[a-z]*.ubuntu.com,ports.ubuntu.com,' /etc/apt/sources.list.d/ubuntu-arm.sources
+            sudo sed -i 's,/ubuntu/$,/ubuntu-ports/,' /etc/apt/sources.list.d/ubuntu-arm.sources
+            sudo sed -i 's/^Components:/Architectures: ${{ matrix.suffix }}\nComponents:/' /etc/apt/sources.list.d/ubuntu-arm.sources
+            sudo sed -i 's/^Components:/Architectures: amd64\nComponents:/' /etc/apt/sources.list.d/ubuntu.sources
+          else
+            sudo cp /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu-arm.list
+            sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+            sudo sed -i 's,[a-z]*.ubuntu.com,ports.ubuntu.com,' /etc/apt/sources.list.d/ubuntu-arm.list
+            sudo sed -i 's,/ubuntu/ ,/ubuntu-ports/ ,' /etc/apt/sources.list.d/ubuntu-arm.list
+            sudo sed -i 's/^deb /deb [arch=${{ matrix.suffix }}] /' /etc/apt/sources.list.d/ubuntu-arm.list
+            cat /etc/apt/sources.list  /etc/apt/sources.list.d/ubuntu-arm.list
+          fi
+          sudo dpkg --add-architecture ${{ matrix.suffix }}
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-${{ matrix.arch }}-linux-gnu g++-${{ matrix.arch }}-linux-gnu libssl-dev:${{ matrix.suffix }} pkg-config
+      - name: Cross compile binary
+        if: matrix.suffix != 'amd64'
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: "${{ matrix.arch }}-linux-gnu-gcc"
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_PATH: "/usr/lib/${{ matrix.arch }}-linux-gnu/pkgconfig"
+          OPENSSL_DIR: "/usr/${{ matrix.arch }}-linux-gnu"
+          OPENSSL_LIB_DIR: "/usr/lib/${{ matrix.arch }}-linux-gnu"
+          OPENSSL_INCLUDE_DIR: "/usr/${{ matrix.arch }}-linux-gnu/include"
+      - name: Build binary (x86_64)
+        if: matrix.suffix != 'arm64'
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Rename binary with platform suffix
+        run: mv target/${{ matrix.target }}/release/certhoover target/${{ matrix.target }}/release/certhoover-${{ matrix.suffix }}
+      - name: Upload Release Asset
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/${{ matrix.target }}/release/certhoover-${{ matrix.suffix }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload build artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: certhoover-${{ matrix.suffix }}
+          path: target/${{ matrix.target }}/release/certhoover-${{ matrix.suffix }}
