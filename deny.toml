@@ -14,5 +14,6 @@ allow = [
     "ISC",
     "0BSD",
     "Unlicense",
-    "Unicode-3.0"
+    "Unicode-3.0",
+    "LGPL-2.1 WITH GCC-exception-2.0"
 ]
