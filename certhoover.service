@@ -5,13 +5,13 @@ After=network.target
 [Service]
 Type=simple
 # Set the working directory to your project folder
-WorkingDirectory=/var/lib/certhoover/
+WorkingDirectory=/etc/certhoover
 # Use systemd runtime directory for liveness file
 RuntimeDirectory=certhoover
 # Adjust the path to your binary if needed
-ExecStart=/var/lib/certhoover/certhoover
+ExecStart=/usr/local/bin/certhoover
 # Environment variable for config override (optional)
-Environment=CERTHOOVER_CONFIG=/etc/certhoover.toml
+Environment=CERTHOOVER_CONFIG=/etc/certhoover/config.toml
 Restart=on-failure
 # Liveness file will be at /run/certhoover/liveness
 
