@@ -72,10 +72,52 @@ logging_level = "info"
 - [`anyhow`](https://crates.io/crates/anyhow) (error handling)
 - [`log`, `env_logger`](https://crates.io/crates/log) (logging)
 
-## Contributing
-Pull requests and issues are welcome! Please:
-- Run `cargo test` and `cargo clippy --all-targets --all-features -- -D warnings` before submitting.
-- Document new features and public APIs with Rustdoc comments.
+## Systemd Service Installation
+
+To run Certhoover as a background service on Linux, you can install it as a `systemd` service. This is the recommended way to run Certhoover in production.
+
+### 1. Build and Install the Binary
+```sh
+cargo build --release
+sudo cp target/release/certhoover /usr/local/bin/
+```
+
+### 2. Create a Dedicated System User
+It is best practice to run Certhoover as a non-privileged system user:
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin certhoover
+```
+
+### 3. Place Your Config
+Make sure your `config.toml` is readable by the `certhoover` user. For example:
+```sh
+sudo mkdir -p /etc/certhoover
+sudo cp config.toml /etc/certhoover/config.toml
+sudo chown -R certhoover:certhoover /etc/certhoover
+```
+
+### 4. Install the systemd Unit File
+
+A sample and up-to-date `certhoover.service` file is provided in this repository. To install it:
+
+```sh
+sudo cp certhoover.service /etc/systemd/system/certhoover.service
+```
+
+**Review and edit** the file as needed:
+- Adjust `ExecStart` to match your binary location (e.g., `/usr/local/bin/certhoover` or `/var/lib/certhoover/certhoover`).
+- Set `WorkingDirectory` and `CERTHOOVER_CONFIG` to your desired config and runtime paths.
+- Ensure the `User` and `Group` match your created system user.
+
+See comments in the `certhoover.service` file for further customization and liveness/Watchdog settings.
+
+### 5. Enable and Start the Service
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable certhoover
+sudo systemctl start certhoover
+sudo systemctl status certhoover
+```
 
 ---
 

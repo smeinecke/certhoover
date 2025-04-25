@@ -11,7 +11,7 @@ RuntimeDirectory=certhoover
 # Adjust the path to your binary if needed
 ExecStart=/var/lib/certhoover/certhoover
 # Environment variable for config override (optional)
-# Environment=CERTHOOVER_CONFIG=/etc/certhoover/config.toml
+Environment=CERTHOOVER_CONFIG=/etc/certhoover.toml
 Restart=on-failure
 # Liveness file will be at /run/certhoover/liveness
 
