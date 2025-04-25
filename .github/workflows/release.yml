@@ -28,8 +28,24 @@ jobs:
       - name: Install aarch64 cross-compiler and OpenSSL for cross
         if: matrix.suffix == 'arm64'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libssl-dev:arm64 pkg-config
+          # check for deb822 source format
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu-arm.sources
+            sed -i 's,[a-z]*.ubuntu.com,ports.ubuntu.com,' /etc/apt/sources.list.d/ubuntu-arm.sources
+            sed -i 's,/ubuntu/$,/ubuntu-ports/,' /etc/apt/sources.list.d/ubuntu-arm.sources
+            sed -i 's/^Components:/Architectures: arm64\nComponents:/' /etc/apt/sources.list.d/ubuntu-arm.sources
+            sed -i 's/^Components:/Architectures: amd64\nComponents:/' /etc/apt/sources.list.d/ubuntu.sources
+          else
+            cp /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu-arm.list
+            sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+            sed -i 's,[a-z]*.ubuntu.com,ports.ubuntu.com,' /etc/apt/sources.list.d/ubuntu-arm.list
+            sed -i 's,/ubuntu/ ,/ubuntu-ports/ ,' /etc/apt/sources.list.d/ubuntu-arm.list
+            sed -i 's/^deb /deb [arch=arm64] /' /etc/apt/sources.list.d/ubuntu-arm.list
+            cat /etc/apt/sources.list  /etc/apt/sources.list.d/ubuntu-arm.list
+          fi
+          dpkg --add-architecture arm64
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libssl-dev:arm64 pkg-config
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }}
         env:
