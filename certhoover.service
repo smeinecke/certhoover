@@ -13,11 +13,8 @@ ExecStart=/usr/local/bin/certhoover
 # Environment variable for config override (optional)
 Environment=CERTHOOVER_CONFIG=/etc/certhoover/config.toml
 Restart=on-failure
-# Liveness file will be at /run/certhoover/liveness
-
-# Liveness monitoring using systemd's Watchdog
+# Enable systemd watchdog (requires enable_systemd_notify=true in config.toml)
 WatchdogSec=60
-WatchdogDevice=liveness.txt
 
 [Install]
 WantedBy=multi-user.target

@@ -17,7 +17,7 @@ FROM debian:stable-slim AS runtime
 WORKDIR /app
 
 RUN apt update \
-    && apt install -y openssl ca-certificates \
+    && apt install -y openssl ca-certificates libsystemd-dev libssl-dev pkg-config \
     && apt clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 

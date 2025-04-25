@@ -7,8 +7,8 @@ use config_mod::AppConfig;
 use futures_util::{SinkExt, StreamExt};
 use log::{info, warn};
 use publicsuffix::{List, Psl};
-use std::path::PathBuf;
 use std::time::Duration;
+// systemd notification is only used if enabled in config
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -71,8 +71,8 @@ async fn main() -> Result<()> {
         batch_records(ws_receiver, batch_sender, batch_size, max_batch_age).await;
     });
 
-    let liveness_path = std::path::PathBuf::from(&config.service.liveness_path);
-    insert_records(clickhouse_conn_str, batch_receiver, liveness_path)
+    let enable_systemd_notify = config.service.enable_systemd_notify;
+    insert_records(clickhouse_conn_str, batch_receiver, enable_systemd_notify)
         .await
         .with_context(|| "Failed to insert records into ClickHouse")?;
 
@@ -122,22 +122,12 @@ ORDER BY (cert_index, domain, timestamp)"#;
     Ok(())
 }
 
-fn touch_file(path: &PathBuf) -> std::io::Result<()> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-    Ok(())
-}
-
 async fn insert_records(
     connection_string: String,
     mut batch_receiver: tokio::sync::mpsc::Receiver<Vec<TransparencyRecord>>,
-    liveness_path: PathBuf,
+    enable_systemd_notify: bool,
 ) -> Result<()> {
     // Process batch of records for insertion.
-
     let list = List::default();
     let pool = Pool::new(connection_string.clone());
     let mut client = pool.get_handle().await?;
@@ -145,7 +135,7 @@ async fn insert_records(
 
     while let Some(batch) = batch_receiver.recv().await {
         // Update liveness file
-        let _ = touch_file(&liveness_path);
+
         let mut block = Block::with_capacity(batch.len());
         let mut inserted = 0;
         for record in &batch {
@@ -248,6 +238,13 @@ async fn insert_records(
             batch.len(),
             inserted
         );
+        // Notify systemd watchdog after each batch if enabled
+        if enable_systemd_notify {
+            #[cfg(unix)]
+            {
+                let _ = systemd::daemon::notify(false, std::iter::once(&("WATCHDOG", "1")));
+            }
+        }
     }
     Ok(())
 }

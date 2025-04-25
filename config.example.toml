@@ -9,7 +9,8 @@ password = ""
 database = "default"
 
 [service]
-liveness_path = "/run/certhoover/liveness"
+# Enable systemd watchdog notifications (requires libsystemd-dev and WatchdogSec in service file)
+enable_systemd_notify = true
 batch_size = 1000
 max_batch_age_secs = 5
 logging_level = "info"

@@ -18,3 +18,4 @@ toml = "0.8.20"
 tokio-tungstenite = { version = "0.23.1", features=["native-tls"] }
 publicsuffix = "2.2"
 anyhow = "1.0"
+systemd = { version = "0.10" }

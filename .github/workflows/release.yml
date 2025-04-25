@@ -47,7 +47,12 @@ jobs:
           fi
           sudo dpkg --add-architecture ${{ matrix.suffix }}
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-${{ matrix.arch }}-linux-gnu g++-${{ matrix.arch }}-linux-gnu libssl-dev:${{ matrix.suffix }} pkg-config
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-${{ matrix.arch }}-linux-gnu g++-${{ matrix.arch }}-linux-gnu libssl-dev:${{ matrix.suffix }} pkg-config libsystemd-dev
+      - name: Install ${{ matrix.suffix }} cross-compiler and OpenSSL for cross
+        if: matrix.suffix == 'amd64'
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev pkg-config libsystemd-dev
       - name: Cross compile binary
         if: matrix.suffix != 'amd64'
         run: cargo build --release --target ${{ matrix.target }}

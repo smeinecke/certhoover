@@ -38,13 +38,14 @@ password = ""
 database = "default"
 
 [service]
-liveness_path = "/run/certhoover/liveness"
+# Enable systemd watchdog notifications (requires libsystemd-dev and WatchdogSec in service file)
+enable_systemd_notify = true
 batch_size = 1000
 max_batch_age_secs = 5
 logging_level = "info"
 ```
 
-- The `[service]` section allows you to control batching, logging, and liveness file output.
+- The `[service]` section allows you to control batching, logging, and systemd integration.
 - For best results, use a modern Certstream server such as [certstream-server-go](https://github.com/d-Rickyy-b/certstream-server-go).
 
 ## Development
@@ -97,6 +98,11 @@ sudo chown -R certhoover:certhoover /etc/certhoover
 ```
 
 ### 4. Install the systemd Unit File
+
+**Note:** If you want to use systemd integration (watchdog notifications), you must have the `libsystemd-dev` package installed on your system before building Certhoover from source. On Debian/Ubuntu, install it with:
+```sh
+sudo apt install libsystemd-dev
+```
 
 A sample and up-to-date `certhoover.service` file is provided in this repository. To install it:
 

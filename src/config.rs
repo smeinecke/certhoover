@@ -16,7 +16,7 @@ pub struct ClickhouseConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct ServiceConfig {
-    pub liveness_path: String,
+    pub enable_systemd_notify: bool,
     pub batch_size: usize,
     pub max_batch_age_secs: u64,
     pub logging_level: String,
