@@ -1,26 +1,14 @@
-mod config;
-
 use anyhow::{Context, Result};
+use certhoover::config::AppConfig;
+use certhoover::reformat_cert_fields;
 use clickhouse_rs::{row, types::Block, ClientHandle, Pool};
-use config as config_mod;
-use config_mod::AppConfig;
 use futures_util::{SinkExt, StreamExt};
 use log::{info, warn};
-use publicsuffix::{List, Psl};
+use publicsuffix::List;
 use std::time::Duration;
 // systemd notification is only used if enabled in config
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-
-fn parse_subject_aggregated(aggregated: &str) -> std::collections::HashMap<&str, String> {
-    let mut map = std::collections::HashMap::new();
-    for part in aggregated.split('/') {
-        if let Some((key, value)) = part.split_once('=') {
-            map.insert(key, value.to_string());
-        }
-    }
-    map
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -141,87 +129,39 @@ async fn insert_records(
         for record in &batch {
             match &record.data {
                 Some(data) => {
-                    let agg_map = data
-                        .leaf_cert
-                        .subject
-                        .aggregated
-                        .as_ref()
-                        .map(|agg| parse_subject_aggregated(agg));
-
-                    let get_field = |key: &str, orig: &Option<String>| {
-                        orig.clone()
-                            .or_else(|| agg_map.as_ref().and_then(|m| m.get(key).cloned()))
+                    let row_struct = reformat_cert_fields(data, &list);
+                    let row = row! {
+                        "cert_index" => row_struct.cert_index,
+                        "cert_link" => row_struct.cert_link,
+                        "fingerprint" => row_struct.fingerprint,
+                        "not_after" => row_struct.not_after,
+                        "not_before" => row_struct.not_before,
+                        "serial_number" => row_struct.serial_number,
+                        "c" => row_struct.c,
+                        "cn" => row_struct.cn,
+                        "l" => row_struct.l,
+                        "o" => row_struct.o,
+                        "ou" => row_struct.ou,
+                        "st" => row_struct.st,
+                        "aggregated" => row_struct.aggregated,
+                        "email_address" => row_struct.email_address,
+                        "domain" => row_struct.domain,
+                        "hostnames" => row_struct.hostnames,
+                        "tld" => row_struct.tld,
+                        "root_domain" => row_struct.root_domain,
+                        "authority_info_access" => row_struct.authority_info_access,
+                        "authority_key_identifier" => row_struct.authority_key_identifier,
+                        "basic_constraints" => row_struct.basic_constraints,
+                        "certificate_policies" => row_struct.certificate_policies,
+                        "ctl_signed_certificate_timestamp" => row_struct.ctl_signed_certificate_timestamp,
+                        "extended_key_usage" => row_struct.extended_key_usage,
+                        "key_usage" => row_struct.key_usage,
+                        "subject_alt_name" => row_struct.subject_alt_name,
+                        "subject_key_identifier" => row_struct.subject_key_identifier,
+                        "signature_algorithm" => row_struct.signature_algorithm
                     };
-
-                    let domain = data
-                        .leaf_cert
-                        .all_domains
-                        .first()
-                        .cloned()
-                        .or_else(|| get_field("CN", &data.leaf_cert.subject.cn))
-                        .unwrap_or_default();
-
-                    let mut hostnames_set = std::collections::HashSet::new();
-                    // Extract from subject_alt_name
-                    if let Some(san) = data.leaf_cert.extensions.subject_alt_name.as_ref() {
-                        for entry in san.split(',') {
-                            let entry = entry.trim();
-                            if let Some(host) = entry.strip_prefix("DNS:") {
-                                hostnames_set.insert(host.to_string());
-                            }
-                        }
-                    }
-
-                    hostnames_set.insert(domain.clone());
-                    let mut hostnames: Vec<String> = hostnames_set.into_iter().collect();
-                    hostnames.sort();
-                    let hostnames_json = serde_json::to_string(&hostnames).unwrap();
-
-                    let domain = domain
-                        .strip_prefix("*.")
-                        .map_or(domain.clone(), |s| s.to_string());
-
-                    let tld = match list.suffix(domain.as_bytes()) {
-                        Some(s) => std::str::from_utf8(s.as_bytes()).unwrap_or("").to_string(),
-                        None => "".to_string(),
-                    };
-                    let root_domain = match list.domain(domain.as_bytes()) {
-                        Some(d) => std::str::from_utf8(d.as_bytes()).unwrap_or("").to_string(),
-                        None => "".to_string(),
-                    };
-
-                    if let Err(e) = block.push(row!{
-                        "cert_index" => data.cert_index,
-                        "cert_link" => data.cert_link.clone(),
-                        "fingerprint" => data.leaf_cert.fingerprint.clone(),
-                        "not_after" => data.leaf_cert.not_after,
-                        "not_before" => data.leaf_cert.not_before,
-                        "serial_number" => data.leaf_cert.serial_number.clone(),
-                        "c" => get_field("C", &data.leaf_cert.subject.c).unwrap_or_default(),
-                        "cn" => get_field("CN", &data.leaf_cert.subject.cn).unwrap_or_default(),
-                        "l" => get_field("L", &data.leaf_cert.subject.l).unwrap_or_default(),
-                        "o" => get_field("O", &data.leaf_cert.subject.o).unwrap_or_default(),
-                        "ou" => get_field("OU", &data.leaf_cert.subject.ou).unwrap_or_default(),
-                        "st" => get_field("ST", &data.leaf_cert.subject.st).unwrap_or_default(),
-                        "aggregated" => data.leaf_cert.subject.aggregated.clone().unwrap_or_default(),
-                        "email_address" => data.leaf_cert.subject.email_address.clone().unwrap_or_default(),
-                        "domain" => domain,
-                        "hostnames" => hostnames_json,
-                        "tld" => tld,
-                        "root_domain" => root_domain,
-                        "authority_info_access" => data.leaf_cert.extensions.authority_info_access.clone().unwrap_or_default(),
-                        "authority_key_identifier" => data.leaf_cert.extensions.authority_key_identifier.clone().unwrap_or_default(),
-                        "basic_constraints" => data.leaf_cert.extensions.basic_constraints.clone().unwrap_or_default(),
-                        "certificate_policies" => data.leaf_cert.extensions.certificate_policies.clone().unwrap_or_default(),
-                        "ctl_signed_certificate_timestamp" => data.leaf_cert.extensions.ctl_signed_certificate_timestamp.clone().unwrap_or_default(),
-                        "extended_key_usage" => data.leaf_cert.extensions.extended_key_usage.clone().unwrap_or_default(),
-                        "key_usage" => data.leaf_cert.extensions.key_usage.clone().unwrap_or_default(),
-                        "subject_alt_name" => data.leaf_cert.extensions.subject_alt_name.clone().unwrap_or_default(),
-                        "subject_key_identifier" => data.leaf_cert.extensions.subject_key_identifier.clone().unwrap_or_default(),
-                        "signature_algorithm" => data.leaf_cert.signature_algorithm.clone().unwrap_or_default(),
-                    }) {
-                        warn!("Failed to add row to block: {e:?} (record: {:?})", record);
-                        continue;
+                    if let Err(e) = block.push(row) {
+                        warn!("Failed to push row to block: {:?}", e);
                     }
                     inserted += 1;
                 }

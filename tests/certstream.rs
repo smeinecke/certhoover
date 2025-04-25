@@ -123,15 +123,18 @@ fn test_transparency_record_json_parsing() {
         },
         "message_type": "certificate_update"
     }"#;
+    use certhoover::reformat_cert_fields;
+    use publicsuffix::List;
     let rec: TransparencyRecord = serde_json::from_str(json).unwrap();
     assert_eq!(rec.message_type, "certificate_update");
     let data = rec.data.expect("data should be Some");
-    assert_eq!(data.cert_index, 123);
-    assert_eq!(data.leaf_cert.all_domains[0], "example.com");
-    assert_eq!(
-        data.leaf_cert.subject.email_address.as_deref(),
-        Some("admin@example.com")
-    );
+    let list = List::default();
+    let row = reformat_cert_fields(&data, &list);
+    assert_eq!(row.cert_index, 123);
+    assert_eq!(row.domain, "example.com");
+    assert_eq!(row.email_address, "admin@example.com");
+    assert_eq!(row.fingerprint, "ABCDEF");
+    assert_eq!(row.signature_algorithm, "sha256RSA");
 }
 
 #[test]
