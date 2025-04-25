@@ -55,7 +55,9 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: "${{ matrix.arch }}-linux-gnu-gcc"
           PKG_CONFIG_ALLOW_CROSS: "1"
           PKG_CONFIG_PATH: "/usr/lib/${{ matrix.arch }}-linux-gnu/pkgconfig"
-          OPENSSL_DIR: "/usr/lib/${{ matrix.arch }}-linux-gnu"
+          OPENSSL_DIR: "/usr/${{ matrix.arch }}-linux-gnu"
+          OPENSSL_LIB_DIR: "/usr/lib/${{ matrix.arch }}-linux-gnu"
+          OPENSSL_INCLUDE_DIR: "/usr/${{ matrix.arch }}-linux-gnu/include"
       - name: Build binary (x86_64)
         if: matrix.suffix != 'arm64'
         run: cargo build --release --target ${{ matrix.target }}
