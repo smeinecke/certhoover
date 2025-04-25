@@ -1,5 +1,6 @@
 mod config;
 
+use anyhow::{Context, Result};
 use clickhouse_rs::{row, types::Block, ClientHandle, Pool};
 use config as config_mod;
 use config_mod::AppConfig;
@@ -10,7 +11,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use anyhow::{Context, Result};
 
 fn parse_subject_aggregated(aggregated: &str) -> std::collections::HashMap<&str, String> {
     let mut map = std::collections::HashMap::new();
@@ -130,7 +130,6 @@ fn touch_file(path: &PathBuf) -> std::io::Result<()> {
         .open(path)?;
     Ok(())
 }
-
 
 async fn insert_records(
     connection_string: String,
