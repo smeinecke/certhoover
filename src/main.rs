@@ -6,11 +6,11 @@ use config_mod::AppConfig;
 use futures_util::{SinkExt, StreamExt};
 use log::{info, warn};
 use publicsuffix::{List, Psl};
-use std::error::Error;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+use anyhow::{Context, Result};
 
 fn parse_subject_aggregated(aggregated: &str) -> std::collections::HashMap<&str, String> {
     let mut map = std::collections::HashMap::new();
@@ -23,14 +23,12 @@ fn parse_subject_aggregated(aggregated: &str) -> std::collections::HashMap<&str,
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     // Allow config path override via CERTHOOVER_CONFIG env var
     let config_path =
         std::env::var("CERTHOOVER_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
-    let config = AppConfig::from_file(&config_path).unwrap_or_else(|e| {
-        eprintln!("Failed to load config from '{}': {e}", config_path);
-        std::process::exit(1);
-    });
+    let config = AppConfig::from_file(&config_path)
+        .with_context(|| format!("Failed to load config from '{}':", config_path))?;
 
     // Set RUST_LOG from config if not already set
     if std::env::var("RUST_LOG").is_err() {
@@ -76,13 +74,14 @@ async fn main() {
     let liveness_path = std::path::PathBuf::from(&config.service.liveness_path);
     insert_records(clickhouse_conn_str, batch_receiver, liveness_path)
         .await
-        .unwrap();
+        .with_context(|| "Failed to insert records into ClickHouse")?;
 
-    websocket_task.await.unwrap();
-    batcher_task.await.unwrap();
+    websocket_task.await.context("Websocket task failed")?;
+    batcher_task.await.context("Batcher task failed")?;
+    Ok(())
 }
 
-async fn maybe_create_table(client: &mut ClientHandle) -> Result<(), Box<dyn Error>> {
+async fn maybe_create_table(client: &mut ClientHandle) -> anyhow::Result<()> {
     let create_table_query = r#"
 CREATE TABLE IF NOT EXISTS certs
 (
@@ -119,50 +118,35 @@ CREATE TABLE IF NOT EXISTS certs
 ENGINE = MergeTree
 ORDER BY (cert_index, domain, timestamp)"#;
 
-    match client.execute(create_table_query).await {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            eprintln!("Failed to create table: {}", e);
-            Err(Box::new(e))
-        }
-    }
+    client.execute(create_table_query).await?;
+    Ok(())
 }
 
-fn touch_file(path: &PathBuf) {
+fn touch_file(path: &PathBuf) -> std::io::Result<()> {
     std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(path)
-        .unwrap();
+        .open(path)?;
+    Ok(())
 }
+
 
 async fn insert_records(
     connection_string: String,
     mut batch_receiver: tokio::sync::mpsc::Receiver<Vec<TransparencyRecord>>,
     liveness_path: PathBuf,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<()> {
     // Process batch of records for insertion.
 
     let list = List::default();
     let pool = Pool::new(connection_string.clone());
-    let mut client = match pool.get_handle().await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "Failed to connect to ClickHouse: {e}\nConnection string: {connection_string}"
-            );
-            return Err(Box::new(e));
-        }
-    };
-    if let Err(e) = maybe_create_table(&mut client).await {
-        eprintln!("Table creation failed: {e}");
-        return Err(e);
-    }
+    let mut client = pool.get_handle().await?;
+    maybe_create_table(&mut client).await?;
 
     while let Some(batch) = batch_receiver.recv().await {
         // Update liveness file
-        touch_file(&liveness_path);
+        let _ = touch_file(&liveness_path);
         let mut block = Block::with_capacity(batch.len());
         let mut inserted = 0;
         for record in &batch {
@@ -258,8 +242,7 @@ async fn insert_records(
             }
         }
         if let Err(e) = client.insert("certs", block).await {
-            eprintln!("Failed to insert batch into ClickHouse: {e}");
-            return Err(Box::new(e));
+            anyhow::bail!("Failed to insert block: {}", e);
         }
         info!(
             "Written batch of {} records, expanded to {} rows",
@@ -280,7 +263,13 @@ async fn batch_records(
     let mut last_batch_time = tokio::time::Instant::now();
 
     while let Some(message) = ws_read_channel.recv().await {
-        let record: TransparencyRecord = serde_json::from_str(&message).unwrap();
+        let record: TransparencyRecord = match serde_json::from_str(&message) {
+            Ok(rec) => rec,
+            Err(e) => {
+                warn!("Failed to parse JSON: {e}");
+                continue;
+            }
+        };
         message_buffer.push(record);
 
         if message_buffer.len() >= batch_size || last_batch_time.elapsed() >= max_batch_age {
