@@ -2,8 +2,9 @@
 url = "wss://certstream.calidog.io/"
 
 [clickhouse]
+# Uses the ClickHouse HTTP interface (default 8123, not the native TCP port 9000)
 host = "localhost"
-port = 9000
+port = 8123
 user = "default"
 password = ""
 database = "default"

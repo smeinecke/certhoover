@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use certhoover::config::AppConfig;
 use certhoover::reformat_cert_fields;
-use clickhouse_rs::{row, types::Block, ClientHandle, Pool};
+use certhoover::CertificateRow;
+use clickhouse::Client;
 use futures_util::{SinkExt, StreamExt};
 use log::{info, warn};
 use publicsuffix::List;
@@ -32,23 +33,18 @@ async fn main() -> Result<()> {
 
     let certstream_url = config.certstream.url.clone();
     let clickhouse_cfg = config.clickhouse;
-    let clickhouse_conn_str = match (
-        clickhouse_cfg.user.as_str(),
-        clickhouse_cfg.password.as_str(),
-    ) {
-        (user, password) if !user.is_empty() && !password.is_empty() => format!(
-            "tcp://{user}:{password}@{}:{}/{}",
-            clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database
-        ),
-        (user, _) if !user.is_empty() => format!(
-            "tcp://{user}@{}:{}/{}",
-            clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database
-        ),
-        _ => format!(
-            "tcp://{}:{}/{}",
-            clickhouse_cfg.host, clickhouse_cfg.port, clickhouse_cfg.database
-        ),
-    };
+    let mut ch_client = Client::default()
+        .with_url(format!(
+            "http://{}:{}",
+            clickhouse_cfg.host, clickhouse_cfg.port
+        ))
+        .with_database(clickhouse_cfg.database);
+    if !clickhouse_cfg.user.is_empty() {
+        ch_client = ch_client.with_user(clickhouse_cfg.user);
+    }
+    if !clickhouse_cfg.password.is_empty() {
+        ch_client = ch_client.with_password(clickhouse_cfg.password);
+    }
 
     let ws_sender_clone = ws_sender.clone();
     let websocket_task = tokio::spawn(async move {
@@ -62,7 +58,7 @@ async fn main() -> Result<()> {
     let enable_systemd_notify = config.service.enable_systemd_notify.unwrap_or(false);
     let debug_log_first_batch_record = config.service.debug_log_first_batch_record;
     insert_records(
-        clickhouse_conn_str,
+        ch_client,
         batch_receiver,
         enable_systemd_notify,
         debug_log_first_batch_record,
@@ -75,58 +71,59 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn maybe_create_table(client: &mut ClientHandle) -> anyhow::Result<()> {
+async fn maybe_create_table(client: &Client) -> anyhow::Result<()> {
     let create_table_query = r#"
 CREATE TABLE IF NOT EXISTS certs
 (
-    `timestamp` DateTime DEFAULT now(),
-    `cert_index` UInt64,
-    `cert_link` String,
-    `domain` String,
-    `hostnames` String,
-    `tld` String,
-    `root_domain` String,
+    `timestamp` DateTime DEFAULT now() CODEC(DoubleDelta, LZ4),
+    `cert_index` UInt64 CODEC(T64, ZSTD(1)),
+    `cert_link` String CODEC(ZSTD(3)),
+    `domain` String CODEC(ZSTD(3)),
+    `hostnames` String CODEC(ZSTD(3)),
+    `tld` LowCardinality(String),
+    `root_domain` LowCardinality(String),
     `fingerprint` String,
-    `not_after` UInt64,
-    `not_before` UInt64,
+    `not_after` UInt64 CODEC(T64, ZSTD(1)),
+    `not_before` UInt64 CODEC(T64, ZSTD(1)),
     `serial_number` String,
-    `c` String,
-    `cn` String,
-    `l` String,
-    `o` String,
-    `ou` String,
-    `st` String,
-    `aggregated` String,
-    `email_address` String,
-    `authority_info_access` String,
-    `authority_key_identifier` String,
-    `basic_constraints` String,
-    `certificate_policies` String,
-    `ctl_signed_certificate_timestamp` String,
-    `extended_key_usage` String,
-    `key_usage` String,
-    `subject_alt_name` String,
-    `subject_key_identifier` String,
-    `signature_algorithm` String
+    `c` LowCardinality(String),
+    `cn` String CODEC(ZSTD(3)),
+    `l` LowCardinality(String),
+    `o` LowCardinality(String),
+    `ou` LowCardinality(String),
+    `st` LowCardinality(String),
+    `aggregated` String CODEC(ZSTD(3)),
+    `email_address` String CODEC(ZSTD(3)),
+    `authority_info_access` String CODEC(ZSTD(3)),
+    `authority_key_identifier` String CODEC(ZSTD(3)),
+    `basic_constraints` LowCardinality(String),
+    `certificate_policies` String CODEC(ZSTD(3)),
+    `ctl_signed_certificate_timestamp` String CODEC(ZSTD(3)),
+    `extended_key_usage` LowCardinality(String),
+    `key_usage` LowCardinality(String),
+    `subject_alt_name` String CODEC(ZSTD(3)),
+    `subject_key_identifier` String CODEC(ZSTD(3)),
+    `signature_algorithm` LowCardinality(String),
+    `domain_rev` String MATERIALIZED reverse(domain)
 )
 ENGINE = MergeTree
-ORDER BY (cert_index, domain, timestamp)"#;
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (domain, not_before, cert_index)
+SETTINGS index_granularity = 8192"#;
 
-    client.execute(create_table_query).await?;
+    client.query(create_table_query).execute().await?;
     Ok(())
 }
 
 async fn insert_records(
-    connection_string: String,
+    client: Client,
     mut batch_receiver: tokio::sync::mpsc::Receiver<Vec<TransparencyRecord>>,
     enable_systemd_notify: bool,
     debug_log_first_batch_record: bool,
 ) -> Result<()> {
     // Process batch of records for insertion.
     let list = List::default();
-    let pool = Pool::new(connection_string.clone());
-    let mut client = pool.get_handle().await?;
-    maybe_create_table(&mut client).await?;
+    maybe_create_table(&client).await?;
 
     while let Some(batch) = batch_receiver.recv().await {
         if debug_log_first_batch_record {
@@ -136,46 +133,16 @@ async fn insert_records(
                 info!("Batch is empty, no first record to log.");
             }
         }
-        // Update liveness file
 
-        let mut block = Block::with_capacity(batch.len());
+        let mut inserter = client.insert::<CertificateRow>("certs").await?;
         let mut inserted = 0;
         for record in &batch {
             match &record.data {
                 Some(data) => {
                     let row_struct = reformat_cert_fields(data, &list);
-                    let row = row! {
-                        "cert_index" => row_struct.cert_index,
-                        "cert_link" => row_struct.cert_link,
-                        "fingerprint" => row_struct.fingerprint,
-                        "not_after" => row_struct.not_after,
-                        "not_before" => row_struct.not_before,
-                        "serial_number" => row_struct.serial_number,
-                        "c" => row_struct.c,
-                        "cn" => row_struct.cn,
-                        "l" => row_struct.l,
-                        "o" => row_struct.o,
-                        "ou" => row_struct.ou,
-                        "st" => row_struct.st,
-                        "aggregated" => row_struct.aggregated,
-                        "email_address" => row_struct.email_address,
-                        "domain" => row_struct.domain,
-                        "hostnames" => row_struct.hostnames,
-                        "tld" => row_struct.tld,
-                        "root_domain" => row_struct.root_domain,
-                        "authority_info_access" => row_struct.authority_info_access,
-                        "authority_key_identifier" => row_struct.authority_key_identifier,
-                        "basic_constraints" => row_struct.basic_constraints,
-                        "certificate_policies" => row_struct.certificate_policies,
-                        "ctl_signed_certificate_timestamp" => row_struct.ctl_signed_certificate_timestamp,
-                        "extended_key_usage" => row_struct.extended_key_usage,
-                        "key_usage" => row_struct.key_usage,
-                        "subject_alt_name" => row_struct.subject_alt_name,
-                        "subject_key_identifier" => row_struct.subject_key_identifier,
-                        "signature_algorithm" => row_struct.signature_algorithm
-                    };
-                    if let Err(e) = block.push(row) {
-                        warn!("Failed to push row to block: {:?}", e);
+                    if let Err(e) = inserter.write(&row_struct).await {
+                        warn!("Failed to queue row: {:?}", e);
+                        continue;
                     }
                     inserted += 1;
                 }
@@ -184,7 +151,7 @@ async fn insert_records(
                 }
             }
         }
-        if let Err(e) = client.insert("certs", block).await {
+        if let Err(e) = inserter.end().await {
             anyhow::bail!("Failed to insert block: {}", e);
         }
         info!(

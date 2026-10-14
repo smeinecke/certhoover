@@ -4,7 +4,7 @@ use publicsuffix::Psl;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, clickhouse::Row)]
 pub struct CertificateRow {
     pub cert_index: u64,
     pub cert_link: String,
