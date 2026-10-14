@@ -167,10 +167,9 @@ pub fn reformat_cert_fields(
         .strip_prefix("*.")
         .map_or(domain.clone(), |s| s.to_string());
 
-    // Only set tld/root_domain if there is at least one non-IP hostname
-    let any_non_ip = hostnames.iter().any(|h| !is_ip(h));
-
-    let (tld, root_domain) = if any_non_ip {
+    // Only set tld/root_domain when the chosen domain is a real hostname,
+    // not an IP literal or empty (publicsuffix lookups on IPs return junk)
+    let (tld, root_domain) = if !domain.is_empty() && !is_ip(&domain) {
         let tld = match list.suffix(domain.as_bytes()) {
             Some(s) => std::str::from_utf8(s.as_bytes()).unwrap_or("").to_string(),
             None => "".to_string(),
@@ -271,49 +270,51 @@ pub fn reformat_cert_fields(
     }
 }
 
-pub fn batch_records(
-    ws_read_channel: std::sync::mpsc::Receiver<String>,
-    batch_queue: std::sync::mpsc::Sender<Vec<TransparencyRecord>>,
+
+
+pub async fn batch_records(
+    mut ws_read_channel: tokio::sync::mpsc::Receiver<String>,
+    batch_queue: tokio::sync::mpsc::Sender<Vec<TransparencyRecord>>,
     batch_size: usize,
     max_batch_age: Duration,
 ) {
     let mut message_buffer: Vec<TransparencyRecord> = Vec::new();
-    let mut last_batch_time = std::time::Instant::now();
+    let flush_deadline = tokio::time::sleep(max_batch_age);
+    tokio::pin!(flush_deadline);
+
     loop {
-        let timeout = max_batch_age
-            .checked_sub(last_batch_time.elapsed())
-            .unwrap_or(std::time::Duration::from_secs(0));
-        let message = ws_read_channel.recv_timeout(timeout);
-        match message {
-            Ok(msg) => {
-                let record: TransparencyRecord = serde_json::from_str(&msg).unwrap();
+        tokio::select! {
+            message = ws_read_channel.recv() => {
+                let Some(message) = message else { break };
+                let record: TransparencyRecord = match serde_json::from_str(&message) {
+                    Ok(rec) => rec,
+                    Err(e) => {
+                        log::warn!("Failed to parse JSON: {e}");
+                        continue;
+                    }
+                };
                 message_buffer.push(record);
                 if message_buffer.len() >= batch_size {
                     log::info!("Batching up {} records", message_buffer.len());
-                    if let Err(e) = batch_queue.send(message_buffer) {
-                        log::warn!("Batch queue send failed in batch_records: {e}");
-                        break;
+                    if batch_queue.send(std::mem::take(&mut message_buffer)).await.is_err() {
+                        log::warn!("Batch queue send failed in batch_records");
+                        return;
                     }
-                    message_buffer = Vec::new();
-                    last_batch_time = std::time::Instant::now();
+                    flush_deadline.as_mut().reset(tokio::time::Instant::now() + max_batch_age);
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // Time to flush the batch due to age
-                if !message_buffer.is_empty() {
-                    log::info!("Batching up {} records (timeout)", message_buffer.len());
-                    if let Err(e) = batch_queue.send(message_buffer) {
-                        log::warn!("Batch queue send failed in batch_records: {e}");
-                        break;
-                    }
-                    message_buffer = Vec::new();
+            _ = &mut flush_deadline, if !message_buffer.is_empty() => {
+                log::info!("Batching up {} records (timeout)", message_buffer.len());
+                if batch_queue.send(std::mem::take(&mut message_buffer)).await.is_err() {
+                    log::warn!("Batch queue send failed in batch_records");
+                    return;
                 }
-                last_batch_time = std::time::Instant::now();
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                log::warn!("Websocket channel closed in batch_records");
-                break;
+                flush_deadline.as_mut().reset(tokio::time::Instant::now() + max_batch_age);
             }
         }
+    }
+
+    if !message_buffer.is_empty() {
+        let _ = batch_queue.send(message_buffer).await;
     }
 }

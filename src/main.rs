@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use certhoover::batch_records;
 use certhoover::config::AppConfig;
 use certhoover::reformat_cert_fields;
 use certhoover::CertificateRow;
@@ -115,6 +116,15 @@ SETTINGS index_granularity = 8192"#;
     Ok(())
 }
 
+async fn insert_rows(client: &Client, rows: &[CertificateRow]) -> Result<()> {
+    let mut inserter = client.insert::<CertificateRow>("certs").await?;
+    for row in rows {
+        inserter.write(row).await?;
+    }
+    inserter.end().await?;
+    Ok(())
+}
+
 async fn insert_records(
     client: Client,
     mut batch_receiver: tokio::sync::mpsc::Receiver<Vec<TransparencyRecord>>,
@@ -134,30 +144,33 @@ async fn insert_records(
             }
         }
 
-        let mut inserter = client.insert::<CertificateRow>("certs").await?;
-        let mut inserted = 0;
+        let mut rows = Vec::with_capacity(batch.len());
         for record in &batch {
             match &record.data {
-                Some(data) => {
-                    let row_struct = reformat_cert_fields(data, &list);
-                    if let Err(e) = inserter.write(&row_struct).await {
-                        warn!("Failed to queue row: {:?}", e);
-                        continue;
-                    }
-                    inserted += 1;
-                }
-                None => {
-                    warn!("Record missing data field: {:?}", record);
-                }
+                Some(data) => rows.push(reformat_cert_fields(data, &list)),
+                None => warn!("Record missing data field: {:?}", record),
             }
         }
-        if let Err(e) = inserter.end().await {
-            anyhow::bail!("Failed to insert block: {}", e);
+
+        const MAX_ATTEMPTS: u32 = 5;
+        let mut attempt: u32 = 0;
+        loop {
+            match insert_rows(&client, &rows).await {
+                Ok(()) => break,
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= MAX_ATTEMPTS {
+                        anyhow::bail!("Failed to insert block after {MAX_ATTEMPTS} attempts: {e}");
+                    }
+                    warn!("Insert attempt {attempt}/{MAX_ATTEMPTS} failed: {e}; retrying");
+                    tokio::time::sleep(Duration::from_secs(attempt as u64)).await;
+                }
+            }
         }
         info!(
             "Written batch of {} records, expanded to {} rows",
             batch.len(),
-            inserted
+            rows.len()
         );
         // Notify systemd watchdog after each batch if enabled
         if enable_systemd_notify {
@@ -168,37 +181,6 @@ async fn insert_records(
         }
     }
     Ok(())
-}
-
-async fn batch_records(
-    mut ws_read_channel: tokio::sync::mpsc::Receiver<String>,
-    batch_queue: tokio::sync::mpsc::Sender<Vec<TransparencyRecord>>,
-    batch_size: usize,
-    max_batch_age: Duration,
-) {
-    let mut message_buffer: Vec<TransparencyRecord> = Vec::new();
-    let mut last_batch_time = tokio::time::Instant::now();
-
-    while let Some(message) = ws_read_channel.recv().await {
-        let record: TransparencyRecord = match serde_json::from_str(&message) {
-            Ok(rec) => rec,
-            Err(e) => {
-                warn!("Failed to parse JSON: {e}");
-                continue;
-            }
-        };
-        message_buffer.push(record);
-
-        if message_buffer.len() >= batch_size || last_batch_time.elapsed() >= max_batch_age {
-            info!("Batching up {} records", message_buffer.len());
-            if batch_queue.send(message_buffer).await.is_err() {
-                warn!("Batch queue send failed in batch_records");
-                break;
-            }
-            message_buffer = Vec::new();
-            last_batch_time = tokio::time::Instant::now();
-        }
-    }
 }
 
 async fn read_websocket(url: &str, ws_write_channel: tokio::sync::mpsc::Sender<String>) {
@@ -215,20 +197,16 @@ async fn read_websocket(url: &str, ws_write_channel: tokio::sync::mpsc::Sender<S
         let (mut write, mut read) = ws_stream.split();
         let mut error_count: u16 = 0;
         let max_errors = 5;
-        let ping_interval = Duration::from_secs(5);
-        let mut _last_ping_sent = tokio::time::Instant::now();
+        let mut ping_ticker = tokio::time::interval(Duration::from_secs(5));
+        ping_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    // Allow other tasks to run, avoid busy loop
-                }
-                _ = tokio::time::sleep(ping_interval) => {
+                _ = ping_ticker.tick() => {
                     info!("Sending ping");
                     if let Err(e) = write.send(Message::Ping(vec![])).await {
                         warn!("Error sending ping: {:?}", e);
                     }
-                    _last_ping_sent = tokio::time::Instant::now();
                 }
                 msg = read.next() => {
                     match msg {

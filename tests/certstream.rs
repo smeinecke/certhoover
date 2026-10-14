@@ -1,5 +1,4 @@
 use certhoover::{batch_records, TransparencyRecord};
-use std::sync::mpsc;
 use std::time::Duration;
 
 #[test]
@@ -24,28 +23,27 @@ fn test_transparency_record_extra_fields() {
     assert_eq!(rec.message_type, "certificate_update");
 }
 
-#[test]
-fn test_batch_records_multiple_batches() {
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
-    let (ws_sender, ws_receiver) = mpsc::channel();
-    let (batch_sender, batch_receiver) = mpsc::channel();
-    let batch_size = 2;
-    let max_batch_age = Duration::from_secs(60);
-    thread::spawn(move || {
-        certhoover::batch_records(ws_receiver, batch_sender, batch_size, max_batch_age);
-    });
+#[tokio::test]
+async fn test_batch_records_multiple_batches() {
+    let (ws_sender, ws_receiver) = tokio::sync::mpsc::channel(10);
+    let (batch_sender, mut batch_receiver) = tokio::sync::mpsc::channel(10);
+    tokio::spawn(batch_records(ws_receiver, batch_sender, 2, Duration::from_secs(60)));
     for i in 0..4 {
         let msg = serde_json::to_string(&certhoover::TransparencyRecord {
             data: None,
             message_type: format!("test{}", i),
         })
         .unwrap();
-        ws_sender.send(msg).unwrap();
+        ws_sender.send(msg).await.unwrap();
     }
-    let batch1 = batch_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
-    let batch2 = batch_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+    let batch1 = tokio::time::timeout(Duration::from_secs(1), batch_receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let batch2 = tokio::time::timeout(Duration::from_secs(1), batch_receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(batch1.len(), 2);
     assert_eq!(batch2.len(), 2);
 }
@@ -68,20 +66,19 @@ fn test_subject_serde_roundtrip() {
     assert_eq!(parsed.email_address, subject.email_address);
 }
 
-#[test]
-fn test_batch_records_empty_input() {
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
-    let (_ws_sender, ws_receiver) = mpsc::channel::<String>();
-    let (batch_sender, batch_receiver) = mpsc::channel();
-    let batch_size = 2;
-    let max_batch_age = Duration::from_millis(100);
-    thread::spawn(move || {
-        certhoover::batch_records(ws_receiver, batch_sender, batch_size, max_batch_age);
-    });
+#[tokio::test]
+async fn test_batch_records_empty_input() {
+    let (_ws_sender, ws_receiver) = tokio::sync::mpsc::channel::<String>(10);
+    let (batch_sender, mut batch_receiver) = tokio::sync::mpsc::channel(10);
+    tokio::spawn(batch_records(
+        ws_receiver,
+        batch_sender,
+        2,
+        Duration::from_millis(100),
+    ));
     // No messages sent
-    let result = batch_receiver.recv_timeout(Duration::from_millis(200));
+    let result =
+        tokio::time::timeout(Duration::from_millis(200), batch_receiver.recv()).await;
     assert!(result.is_err()); // Should timeout
 }
 
@@ -144,30 +141,54 @@ fn test_transparency_record_invalid_json() {
     assert!(result.is_err());
 }
 
-#[test]
-fn test_batch_records_max_batch_age() {
-    use std::thread;
-    use std::time::Duration;
-    let (ws_sender, ws_receiver) = std::sync::mpsc::channel();
-    let (batch_sender, batch_receiver) = std::sync::mpsc::channel();
-    let batch_size = 10; // Large, so we hit timeout first
-    let max_batch_age = Duration::from_millis(50);
-    thread::spawn(move || {
-        certhoover::batch_records(ws_receiver, batch_sender, batch_size, max_batch_age);
-    });
-    // Give the batch_records thread a moment to start
-    thread::sleep(Duration::from_millis(10));
+#[tokio::test]
+async fn test_batch_records_max_batch_age() {
+    let (ws_sender, ws_receiver) = tokio::sync::mpsc::channel(10);
+    let (batch_sender, mut batch_receiver) = tokio::sync::mpsc::channel(10);
+    // batch_size large enough that only the age timer can flush
+    tokio::spawn(batch_records(
+        ws_receiver,
+        batch_sender,
+        10,
+        Duration::from_millis(50),
+    ));
     let msg = serde_json::to_string(&certhoover::TransparencyRecord {
         data: None,
         message_type: "timeout_test".to_string(),
     })
     .unwrap();
-    ws_sender.send(msg).unwrap();
-    let batch = batch_receiver
-        .recv_timeout(Duration::from_secs(2))
-        .expect("Batch not received in time");
+    ws_sender.send(msg).await.unwrap();
+    let batch = tokio::time::timeout(Duration::from_secs(2), batch_receiver.recv())
+        .await
+        .expect("Batch not received in time")
+        .expect("Channel closed");
     assert_eq!(batch.len(), 1);
     assert_eq!(batch[0].message_type, "timeout_test");
+}
+
+#[tokio::test]
+async fn test_batch_records_flushes_on_channel_close() {
+    let (ws_sender, ws_receiver) = tokio::sync::mpsc::channel(10);
+    let (batch_sender, mut batch_receiver) = tokio::sync::mpsc::channel(10);
+    tokio::spawn(batch_records(
+        ws_receiver,
+        batch_sender,
+        10,
+        Duration::from_secs(60),
+    ));
+    let msg = serde_json::to_string(&certhoover::TransparencyRecord {
+        data: None,
+        message_type: "final_msg".to_string(),
+    })
+    .unwrap();
+    ws_sender.send(msg).await.unwrap();
+    drop(ws_sender); // close input: pending buffer must still be flushed
+    let batch = tokio::time::timeout(Duration::from_secs(2), batch_receiver.recv())
+        .await
+        .expect("Batch not received in time")
+        .expect("Channel closed");
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].message_type, "final_msg");
 }
 
 #[test]
@@ -214,15 +235,16 @@ fn test_transparency_recorddata_serde_roundtrip() {
         original.leaf_cert.subject.email_address
     );
 }
-#[test]
-fn test_batch_records_batches_correctly() {
-    let (ws_sender, ws_receiver) = mpsc::channel();
-    let (batch_sender, batch_receiver) = mpsc::channel();
-    let batch_size = 2;
-    let max_batch_age = Duration::from_secs(60);
-    std::thread::spawn(move || {
-        batch_records(ws_receiver, batch_sender, batch_size, max_batch_age);
-    });
+#[tokio::test]
+async fn test_batch_records_batches_correctly() {
+    let (ws_sender, ws_receiver) = tokio::sync::mpsc::channel(10);
+    let (batch_sender, mut batch_receiver) = tokio::sync::mpsc::channel(10);
+    tokio::spawn(batch_records(
+        ws_receiver,
+        batch_sender,
+        2,
+        Duration::from_secs(60),
+    ));
     let msg1 = serde_json::to_string(&TransparencyRecord {
         data: None,
         message_type: "test1".to_string(),
@@ -233,9 +255,12 @@ fn test_batch_records_batches_correctly() {
         message_type: "test2".to_string(),
     })
     .unwrap();
-    ws_sender.send(msg1).unwrap();
-    ws_sender.send(msg2).unwrap();
-    let batch = batch_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    ws_sender.send(msg1).await.unwrap();
+    ws_sender.send(msg2).await.unwrap();
+    let batch = tokio::time::timeout(Duration::from_secs(2), batch_receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(batch.len(), 2);
     assert_eq!(batch[0].message_type, "test1");
     assert_eq!(batch[1].message_type, "test2");
