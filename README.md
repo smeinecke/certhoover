@@ -39,6 +39,7 @@ database = "default"
 
 [service]
 # Enable systemd watchdog notifications (requires libsystemd-dev and WatchdogSec in service file)
+# Optional: if omitted, defaults to false
 enable_systemd_notify = true
 batch_size = 1000
 max_batch_age_secs = 5
@@ -46,6 +47,7 @@ logging_level = "info"
 ```
 
 - The `[service]` section allows you to control batching, logging, and systemd integration.
+- The `enable_systemd_notify` option is **optional**; if omitted, it defaults to `false`.
 - For best results, use a modern Certstream server such as [certstream-server-go](https://github.com/d-Rickyy-b/certstream-server-go).
 
 ## Development
