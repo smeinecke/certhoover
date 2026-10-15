@@ -27,7 +27,12 @@ fn test_transparency_record_extra_fields() {
 async fn test_batch_records_multiple_batches() {
     let (ws_sender, ws_receiver) = tokio::sync::mpsc::channel(10);
     let (batch_sender, mut batch_receiver) = tokio::sync::mpsc::channel(10);
-    tokio::spawn(batch_records(ws_receiver, batch_sender, 2, Duration::from_secs(60)));
+    tokio::spawn(batch_records(
+        ws_receiver,
+        batch_sender,
+        2,
+        Duration::from_secs(60),
+    ));
     for i in 0..4 {
         let msg = serde_json::to_string(&certhoover::TransparencyRecord {
             data: None,
@@ -77,8 +82,7 @@ async fn test_batch_records_empty_input() {
         Duration::from_millis(100),
     ));
     // No messages sent
-    let result =
-        tokio::time::timeout(Duration::from_millis(200), batch_receiver.recv()).await;
+    let result = tokio::time::timeout(Duration::from_millis(200), batch_receiver.recv()).await;
     assert!(result.is_err()); // Should timeout
 }
 

@@ -11,7 +11,7 @@ fn test_service_config_deserialization() {
     "#;
     let config: ServiceConfig = toml::from_str(toml).unwrap();
     assert_eq!(config.enable_systemd_notify, Some(true));
-    assert_eq!(config.enable_systemd_notify.unwrap_or(false), true);
+    assert!(config.enable_systemd_notify.unwrap_or(false));
     assert_eq!(config.batch_size, 100);
     assert_eq!(config.max_batch_age_secs, 30);
     assert_eq!(config.logging_level, "info");
@@ -24,7 +24,7 @@ fn test_service_config_deserialization() {
     "#;
     let config: ServiceConfig = toml::from_str(toml).unwrap();
     assert_eq!(config.enable_systemd_notify, None);
-    assert_eq!(config.enable_systemd_notify.unwrap_or(false), false);
+    assert!(!config.enable_systemd_notify.unwrap_or(false));
     assert_eq!(config.batch_size, 50);
     assert_eq!(config.max_batch_age_secs, 10);
     assert_eq!(config.logging_level, "debug");

@@ -270,8 +270,6 @@ pub fn reformat_cert_fields(
     }
 }
 
-
-
 pub async fn batch_records(
     mut ws_read_channel: tokio::sync::mpsc::Receiver<String>,
     batch_queue: tokio::sync::mpsc::Sender<Vec<TransparencyRecord>>,
