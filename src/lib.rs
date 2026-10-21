@@ -96,11 +96,11 @@ pub struct Extensions {
     pub subject_key_identifier: Option<String>,
 }
 
-pub fn parse_subject_aggregated(aggregated: &str) -> std::collections::HashMap<&str, String> {
+pub fn parse_subject_aggregated(aggregated: &str) -> std::collections::HashMap<&str, &str> {
     let mut map = std::collections::HashMap::new();
     for part in aggregated.split('/') {
         if let Some((key, value)) = part.split_once('=') {
-            map.insert(key, value.to_string());
+            map.insert(key, value);
         }
     }
     map
@@ -121,9 +121,11 @@ pub fn reformat_cert_fields(
         .as_ref()
         .map(|agg| parse_subject_aggregated(agg));
 
-    let get_field = |key: &str, orig: &Option<String>| {
-        orig.clone()
-            .or_else(|| agg_map.as_ref().and_then(|m| m.get(key).cloned()))
+    let get_field = |key: &str, orig: &Option<String>| -> String {
+        orig.as_deref()
+            .or_else(|| agg_map.as_ref().and_then(|m| m.get(key).copied()))
+            .unwrap_or_default()
+            .to_string()
     };
 
     let cn = get_field("CN", &data.leaf_cert.subject.cn);
@@ -131,36 +133,33 @@ pub fn reformat_cert_fields(
 
     // Find domain
     let all_domains = &data.leaf_cert.all_domains;
-    let domain = all_domains
-        .first()
-        .cloned()
-        .or_else(|| cn.clone())
-        .unwrap_or_default();
+    let domain = all_domains.first().cloned().unwrap_or_else(|| cn.clone());
 
-    let mut hostnames_set = std::collections::HashSet::new();
+    // Collect unique hostnames from subject_alt_name, all_domains and CN.
+    // Vec<&str> + sort/dedup is cheaper than a HashSet<String>: no per-name
+    // String allocation and no hashing, and output order is the same.
+    let mut hostnames: Vec<&str> = Vec::with_capacity(all_domains.len() + 4);
     // Extract from subject_alt_name
     if let Some(san) = subject_alt_name.as_ref() {
         for entry in san.split(',') {
             let entry = entry.trim();
             if let Some(host) = entry.strip_prefix("DNS:") {
-                hostnames_set.insert(host.to_string());
+                hostnames.push(host);
             } else if let Some(ip) = entry.strip_prefix("IP Address:") {
-                hostnames_set.insert(ip.to_string());
+                hostnames.push(ip);
             }
         }
     }
     // Add all domains (including IPs) from all_domains
     for d in all_domains {
-        hostnames_set.insert(d.clone());
+        hostnames.push(d);
     }
-    // Add CN if present and not already in set
-    if let Some(cn_val) = cn.clone() {
-        if !cn_val.is_empty() {
-            hostnames_set.insert(cn_val);
-        }
+    // Add CN if present and not already in the list
+    if !cn.is_empty() {
+        hostnames.push(&cn);
     }
-    let mut hostnames: Vec<String> = hostnames_set.into_iter().collect();
-    hostnames.sort();
+    hostnames.sort_unstable();
+    hostnames.dedup();
     let hostnames_json = serde_json::to_string(&hostnames).unwrap();
 
     let domain = domain
@@ -190,20 +189,19 @@ pub fn reformat_cert_fields(
         not_after: data.leaf_cert.not_after,
         not_before: data.leaf_cert.not_before,
         serial_number: data.leaf_cert.serial_number.clone(),
-        c: get_field("C", &data.leaf_cert.subject.c).unwrap_or_default(),
-        cn: get_field("CN", &data.leaf_cert.subject.cn).unwrap_or_default(),
-        l: get_field("L", &data.leaf_cert.subject.l).unwrap_or_default(),
-        o: get_field("O", &data.leaf_cert.subject.o).unwrap_or_default(),
-        ou: get_field("OU", &data.leaf_cert.subject.ou).unwrap_or_default(),
-        st: get_field("ST", &data.leaf_cert.subject.st).unwrap_or_default(),
+        c: get_field("C", &data.leaf_cert.subject.c),
+        cn,
+        l: get_field("L", &data.leaf_cert.subject.l),
+        o: get_field("O", &data.leaf_cert.subject.o),
+        ou: get_field("OU", &data.leaf_cert.subject.ou),
+        st: get_field("ST", &data.leaf_cert.subject.st),
         aggregated: data
             .leaf_cert
             .subject
             .aggregated
             .clone()
             .unwrap_or_default(),
-        email_address: get_field("emailAddress", &data.leaf_cert.subject.email_address)
-            .unwrap_or_default(),
+        email_address: get_field("emailAddress", &data.leaf_cert.subject.email_address),
         domain,
         hostnames: hostnames_json,
         tld,
@@ -276,7 +274,7 @@ pub async fn batch_records(
     batch_size: usize,
     max_batch_age: Duration,
 ) {
-    let mut message_buffer: Vec<TransparencyRecord> = Vec::new();
+    let mut message_buffer: Vec<TransparencyRecord> = Vec::with_capacity(batch_size);
     let flush_deadline = tokio::time::sleep(max_batch_age);
     tokio::pin!(flush_deadline);
 
@@ -294,7 +292,14 @@ pub async fn batch_records(
                 message_buffer.push(record);
                 if message_buffer.len() >= batch_size {
                     log::info!("Batching up {} records", message_buffer.len());
-                    if batch_queue.send(std::mem::take(&mut message_buffer)).await.is_err() {
+                    if batch_queue
+                        .send(std::mem::replace(
+                            &mut message_buffer,
+                            Vec::with_capacity(batch_size),
+                        ))
+                        .await
+                        .is_err()
+                    {
                         log::warn!("Batch queue send failed in batch_records");
                         return;
                     }
@@ -303,7 +308,14 @@ pub async fn batch_records(
             }
             _ = &mut flush_deadline, if !message_buffer.is_empty() => {
                 log::info!("Batching up {} records (timeout)", message_buffer.len());
-                if batch_queue.send(std::mem::take(&mut message_buffer)).await.is_err() {
+                if batch_queue
+                    .send(std::mem::replace(
+                        &mut message_buffer,
+                        Vec::with_capacity(batch_size),
+                    ))
+                    .await
+                    .is_err()
+                {
                     log::warn!("Batch queue send failed in batch_records");
                     return;
                 }

@@ -26,7 +26,9 @@ async fn main() -> Result<()> {
     }
     env_logger::init();
 
-    let (ws_sender, ws_receiver) = tokio::sync::mpsc::channel(100);
+    // Larger buffer absorbs bursts: if the batcher falls behind, the ws task
+    // stalls here instead of backpressuring TCP until certstream-server drops.
+    let (ws_sender, ws_receiver) = tokio::sync::mpsc::channel(1000);
     let (batch_sender, batch_receiver) = tokio::sync::mpsc::channel(100);
 
     let batch_size = config.service.batch_size;
