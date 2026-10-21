@@ -274,7 +274,9 @@ pub async fn batch_records(
     batch_size: usize,
     max_batch_age: Duration,
 ) {
-    let mut message_buffer: Vec<TransparencyRecord> = Vec::with_capacity(batch_size);
+    // Timeout flushes usually ship far fewer records than batch_size, so cap
+    // the pre-allocation instead of reserving e.g. 50k slots on every swap.
+    let mut message_buffer: Vec<TransparencyRecord> = Vec::with_capacity(batch_size.min(8192));
     let flush_deadline = tokio::time::sleep(max_batch_age);
     tokio::pin!(flush_deadline);
 
@@ -295,7 +297,7 @@ pub async fn batch_records(
                     if batch_queue
                         .send(std::mem::replace(
                             &mut message_buffer,
-                            Vec::with_capacity(batch_size),
+                            Vec::with_capacity(batch_size.min(8192)),
                         ))
                         .await
                         .is_err()
@@ -311,7 +313,7 @@ pub async fn batch_records(
                 if batch_queue
                     .send(std::mem::replace(
                         &mut message_buffer,
-                        Vec::with_capacity(batch_size),
+                        Vec::with_capacity(batch_size.min(8192)),
                     ))
                     .await
                     .is_err()

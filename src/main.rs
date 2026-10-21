@@ -154,6 +154,11 @@ async fn insert_records(
             }
         }
 
+        // A batch consisting only of data-less records has nothing to insert.
+        if rows.is_empty() {
+            continue;
+        }
+
         const MAX_ATTEMPTS: u32 = 5;
         let mut attempt: u32 = 0;
         loop {
