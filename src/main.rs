@@ -134,7 +134,13 @@ async fn insert_records(
     debug_log_first_batch_record: bool,
 ) -> Result<()> {
     // Process batch of records for insertion.
-    let list = List::default();
+    // List::default() is an EMPTY list (wildcard rule only) - suffix()
+    // would return the last label and domain() the last two labels,
+    // breaking tld/root_domain for every multi-label public suffix
+    // (github.io, pages.dev, co.uk, s3-*.amazonaws.com...). A current
+    // snapshot of publicsuffix.org's list is vendored into the binary.
+    let list = List::from_bytes(include_bytes!("../public_suffix_list.dat"))
+        .expect("embedded public_suffix_list.dat must parse");
     maybe_create_table(&client).await?;
 
     while let Some(batch) = batch_receiver.recv().await {

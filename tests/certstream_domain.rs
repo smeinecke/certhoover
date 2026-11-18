@@ -94,3 +94,53 @@ fn test_reformat_cert_fields_basic() {
     assert_eq!(row.email_address, "admin@foo.com");
     assert_eq!(row.signature_algorithm, "sha256RSA");
 }
+
+#[test]
+fn test_root_domain_uses_real_psl() {
+    // The vendored list makes suffix lookups follow the real PSL: a
+    // multi-label public suffix must NOT collapse to last-two-labels.
+    // (List::default() is empty - that was the production bug.)
+    let list =
+        List::from_bytes(include_bytes!("../public_suffix_list.dat")).unwrap();
+
+    let mk = |domains: &[&str]| {
+        let data = TransparencyRecordData {
+            cert_index: 1,
+            cert_link: String::new(),
+            leaf_cert: certhoover::LeafCert {
+                all_domains: domains.iter().map(|s| s.to_string()).collect(),
+                fingerprint: "abc".to_string(),
+                not_after: 0,
+                not_before: 0,
+                serial_number: String::new(),
+                subject: certhoover::Subject {
+                    c: None,
+                    cn: None,
+                    l: None,
+                    o: None,
+                    ou: None,
+                    st: None,
+                    aggregated: None,
+                    email_address: None,
+                },
+                extensions: certhoover::Extensions::default(),
+                signature_algorithm: None,
+            },
+        };
+        reformat_cert_fields(&data, &list)
+    };
+
+    let row = mk(&["foo.pages.dev"]);
+    assert_eq!(row.domain, "foo.pages.dev");
+    assert_eq!(row.tld, "dev"); // last label, matching existing rows
+    assert_eq!(row.root_domain, "foo.pages.dev");
+
+    let row = mk(&["a.b.github.io"]);
+    assert_eq!(row.tld, "io");
+    assert_eq!(row.root_domain, "b.github.io");
+
+    // plain 2-label suffixes keep the old behaviour
+    let row = mk(&["x.y.example.com"]);
+    assert_eq!(row.tld, "com");
+    assert_eq!(row.root_domain, "example.com");
+}

@@ -167,12 +167,12 @@ pub fn reformat_cert_fields(
         .map_or(domain.clone(), |s| s.to_string());
 
     // Only set tld/root_domain when the chosen domain is a real hostname,
-    // not an IP literal or empty (publicsuffix lookups on IPs return junk)
+    // not an IP literal or empty (publicsuffix lookups on IPs return junk).
+    // tld stays the last label (not list.suffix()): existing rows use that
+    // semantics and it is what `%.de`-style searches need - a real-suffix
+    // value would hide x.co.uk from %.uk searches.
     let (tld, root_domain) = if !domain.is_empty() && !is_ip(&domain) {
-        let tld = match list.suffix(domain.as_bytes()) {
-            Some(s) => std::str::from_utf8(s.as_bytes()).unwrap_or("").to_string(),
-            None => "".to_string(),
-        };
+        let tld = domain.rsplit('.').next().unwrap_or("").to_string();
         let root_domain = match list.domain(domain.as_bytes()) {
             Some(d) => std::str::from_utf8(d.as_bytes()).unwrap_or("").to_string(),
             None => "".to_string(),
