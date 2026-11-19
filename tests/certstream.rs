@@ -216,6 +216,7 @@ fn test_transparency_recorddata_serde_roundtrip() {
                 aggregated: None,
                 email_address: Some("admin@foo.com".to_string()),
             },
+            issuer: None,
             extensions: certhoover::Extensions {
                 authority_info_access: None,
                 authority_key_identifier: None,

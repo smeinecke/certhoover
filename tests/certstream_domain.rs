@@ -82,6 +82,16 @@ fn test_reformat_cert_fields_basic() {
                 aggregated: None,
                 email_address: Some("admin@foo.com".to_string()),
             },
+            issuer: Some(certhoover::Subject {
+                c: Some("US".to_string()),
+                cn: Some("R11".to_string()),
+                l: None,
+                o: Some("Let's Encrypt".to_string()),
+                ou: None,
+                st: None,
+                aggregated: Some("/C=US/O=Let's Encrypt/CN=R11".to_string()),
+                email_address: None,
+            }),
             extensions: certhoover::Extensions::default(),
             signature_algorithm: Some("sha256RSA".to_string()),
         },
@@ -93,6 +103,7 @@ fn test_reformat_cert_fields_basic() {
     assert_eq!(row.fingerprint, "FINGERPRINT");
     assert_eq!(row.email_address, "admin@foo.com");
     assert_eq!(row.signature_algorithm, "sha256RSA");
+    assert_eq!(row.issuer, "/C=US/O=Let's Encrypt/CN=R11");
 }
 
 #[test]
@@ -123,6 +134,7 @@ fn test_root_domain_uses_real_psl() {
                     aggregated: None,
                     email_address: None,
                 },
+                issuer: None,
                 extensions: certhoover::Extensions::default(),
                 signature_algorithm: None,
             },

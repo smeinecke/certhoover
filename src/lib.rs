@@ -34,6 +34,7 @@ pub struct CertificateRow {
     pub subject_alt_name: String,
     pub subject_key_identifier: String,
     pub signature_algorithm: String,
+    pub issuer: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +58,8 @@ pub struct LeafCert {
     pub not_before: u64,
     pub serial_number: String,
     pub subject: Subject,
+    #[serde(default)]
+    pub issuer: Option<Subject>,
     pub extensions: Extensions,
     pub signature_algorithm: Option<String>,
 }
@@ -265,7 +268,40 @@ pub fn reformat_cert_fields(
             .signature_algorithm
             .clone()
             .unwrap_or_default(),
+        issuer: issuer_dn(&data.leaf_cert.issuer),
     }
+}
+
+// issuer_dn renders the issuer subject as the same "/K=V" aggregated form
+// the parser emits for the leaf subject - aggregated is authoritative when
+// present, otherwise the DN is composed from the individual fields.
+fn issuer_dn(issuer: &Option<Subject>) -> String {
+    let Some(s) = issuer else {
+        return String::new();
+    };
+    if let Some(agg) = s.aggregated.as_deref() {
+        return agg.to_string();
+    }
+    let mut dn = String::new();
+    for (k, v) in [
+        ("C", &s.c),
+        ("CN", &s.cn),
+        ("L", &s.l),
+        ("O", &s.o),
+        ("OU", &s.ou),
+        ("ST", &s.st),
+        ("emailAddress", &s.email_address),
+    ] {
+        if let Some(v) = v.as_deref() {
+            if !v.is_empty() {
+                dn.push('/');
+                dn.push_str(k);
+                dn.push('=');
+                dn.push_str(v);
+            }
+        }
+    }
+    dn
 }
 
 pub async fn batch_records(
