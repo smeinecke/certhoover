@@ -6,7 +6,9 @@ use certhoover::CertificateRow;
 use clickhouse::Client;
 use futures_util::{SinkExt, StreamExt};
 use log::{info, warn};
+use md5::{Digest, Md5};
 use publicsuffix::List;
+use std::collections::HashSet;
 use std::time::Duration;
 // systemd notification is only used if enabled in config
 use tokio_tungstenite::connect_async;
@@ -127,6 +129,78 @@ async fn insert_rows(client: &Client, rows: &[CertificateRow]) -> Result<()> {
     Ok(())
 }
 
+// dedup_key collapses precert/leaf pairs and multi-log copies of the same
+// cert: serial_number is unique per issuing key (authority_key_identifier),
+// and issuer guards CAs that log entries without AKI data. md5 is used
+// because ClickHouse, Rust and Go all produce identical digests - the
+// seen_certs seed was built with MD5(concat(serial,'|',aki,'|',issuer)).
+fn dedup_key(row: &CertificateRow) -> String {
+    format!(
+        "{:x}",
+        Md5::digest(format!(
+            "{}|{}|{}",
+            row.serial_number, row.authority_key_identifier, row.issuer
+        ))
+    )
+}
+
+// Chunk size for the h IN (...) lookup - each unhex('<64 hex>') literal is
+// ~74 bytes, so 3000 keys (~220KiB) stays under ClickHouse's default
+// max_query_size (256KiB).
+const DEDUP_CHUNK: usize = 3000;
+
+// filter_seen drops rows whose dedup key is already in certstream.seen_certs.
+// Returns the rows to insert plus their keys; on query failure it warns and
+// passes everything through (a rare dupe beats a dropped cert).
+
+async fn filter_seen(
+    client: &Client,
+    rows: Vec<(CertificateRow, String)>,
+) -> Vec<(CertificateRow, String)> {
+    if rows.is_empty() {
+        return rows;
+    }
+    let mut known: HashSet<String> = HashSet::new();
+    let keys: Vec<&str> = rows.iter().map(|(_, k)| k.as_str()).collect();
+    for chunk in keys.chunks(DEDUP_CHUNK) {
+        let list = chunk
+            .iter()
+            .map(|k| format!("unhex('{k}')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let res = client
+            .query(&format!(
+                "SELECT lower(hex(h)) FROM seen_certs WHERE h IN ({list})"
+            ))
+            .fetch_all::<String>()
+            .await;
+        match res {
+            Ok(found) => known.extend(found),
+            Err(e) => {
+                warn!("seen_certs lookup failed, inserting unfiltered: {e}");
+                return rows;
+            }
+        }
+    }
+    rows.into_iter()
+        .filter(|(_, k)| !known.contains(k))
+        .collect()
+}
+
+async fn record_seen(client: &Client, keys: &[String]) {
+    for chunk in keys.chunks(DEDUP_CHUNK) {
+        let list = chunk
+            .iter()
+            .map(|k| format!("unhex('{k}')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let q = format!("INSERT INTO seen_certs SELECT arrayJoin([{list}])");
+        if let Err(e) = client.query(&q).execute().await {
+            warn!("seen_certs insert failed: {e}");
+        }
+    }
+}
+
 async fn insert_records(
     client: Client,
     mut batch_receiver: tokio::sync::mpsc::Receiver<Vec<TransparencyRecord>>,
@@ -143,6 +217,19 @@ async fn insert_records(
         .expect("embedded public_suffix_list.dat must parse");
     maybe_create_table(&client).await?;
 
+    // Ping the watchdog on an independent cadence - a slow ClickHouse call
+    // (big dedup lookup, contended insert) must not starve liveness pings.
+    if enable_systemd_notify {
+        #[cfg(unix)]
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(25));
+            loop {
+                tick.tick().await;
+                let _ = systemd::daemon::notify(false, std::iter::once(&("WATCHDOG", "1")));
+            }
+        });
+    }
+
     while let Some(batch) = batch_receiver.recv().await {
         if debug_log_first_batch_record {
             if let Some(first) = batch.first() {
@@ -152,13 +239,29 @@ async fn insert_records(
             }
         }
 
-        let mut rows = Vec::with_capacity(batch.len());
+        // Local dedup first: the same cert lands in several logs within
+        // seconds, so copies frequently share one batch. The HashSet keeps
+        // the first (row, key) per dedup key.
+        let mut local: HashSet<String> = HashSet::new();
+        let mut rows: Vec<(CertificateRow, String)> = Vec::with_capacity(batch.len());
         for record in &batch {
             match &record.data {
-                Some(data) => rows.push(reformat_cert_fields(data, &list)),
+                Some(data) => {
+                    let row = reformat_cert_fields(data, &list);
+                    let key = dedup_key(&row);
+                    if local.insert(key.clone()) {
+                        rows.push((row, key));
+                    }
+                }
                 None => warn!("Record missing data field: {:?}", record),
             }
         }
+
+        // Then drop certs already stored (seen in earlier batches/logs) -
+        // survivors get their keys recorded so later copies are skipped.
+        let rows = filter_seen(&client, rows).await;
+        let keys: Vec<String> = rows.iter().map(|(_, k)| k.clone()).collect();
+        let rows: Vec<CertificateRow> = rows.into_iter().map(|(r, _)| r).collect();
 
         // A batch consisting only of data-less records has nothing to insert.
         if rows.is_empty() {
@@ -180,18 +283,13 @@ async fn insert_records(
                 }
             }
         }
+        record_seen(&client, &keys).await;
         info!(
-            "Written batch of {} records, expanded to {} rows",
+            "Written batch of {} records, expanded to {} rows ({} already seen)",
             batch.len(),
-            rows.len()
+            rows.len(),
+            local.len() - rows.len()
         );
-        // Notify systemd watchdog after each batch if enabled
-        if enable_systemd_notify {
-            #[cfg(unix)]
-            {
-                let _ = systemd::daemon::notify(false, std::iter::once(&("WATCHDOG", "1")));
-            }
-        }
     }
     Ok(())
 }
